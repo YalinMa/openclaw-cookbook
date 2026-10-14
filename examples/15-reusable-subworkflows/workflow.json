@@ -1,0 +1,51 @@
+{
+  "name": "public-holiday-reminder",
+  "description": "Remind you of the next public holidays in your country, built from two reusable sub-workflows in lib/: fetch-json (HTTP with retries) and notify (format + send).",
+  "args": {
+    "country": {
+      "default": "CN",
+      "description": "Two-letter country code, e.g. CN, US, DE, JP, GB (see date.nager.at for the full list)"
+    },
+    "remind_days": {
+      "default": "14",
+      "description": "Use the 'warning' level when the next holiday is this many days away or closer"
+    },
+    "show": {
+      "default": "3",
+      "description": "How many upcoming holidays to list"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for the reminder (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "holidays",
+      "workflow": "lib/fetch-json.json",
+      "workflow_args": {
+        "url": "https://date.nager.at/api/v3/NextPublicHolidays/${country}"
+      }
+    },
+    {
+      "id": "plan",
+      "stdin": "$holidays.json",
+      "run": "node -e 'const list = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")).filter(h => (h.types || []).includes(\"Public\")); if (!list.length) { console.log(JSON.stringify({ level: \"info\", title: \"No upcoming public holidays found for \" + process.env.LOBSTER_ARG_COUNTRY, body: \"\" })); process.exit(0) } const today = new Date(new Date().toISOString().slice(0, 10)); const days = d => Math.round((new Date(d) - today) / 86400000); const merged = []; for (const h of list) { const last = merged[merged.length - 1]; if (last && last.name === h.name && days(h.date) - days(last.end) === 1) last.end = h.date; else merged.push({ name: h.name, local: h.localName, date: h.date, end: h.date }) } const next = merged[0]; const d = days(next.date); const label = h => h.name + (h.local && h.local !== h.name ? \" (\" + h.local + \")\" : \"\") + \" — \" + h.date + (h.end !== h.date ? \" to \" + h.end : \"\") + \", in \" + days(h.date) + \" days\"; const body = merged.slice(0, Number(process.env.LOBSTER_ARG_SHOW)).map(h => \"• \" + label(h)).join(\"\\n\"); const soon = d <= Number(process.env.LOBSTER_ARG_REMIND_DAYS); console.log(JSON.stringify({ level: d <= 1 ? \"success\" : soon ? \"warning\" : \"info\", title: d <= 1 ? next.name + \" starts \" + (d <= 0 ? \"today\" : \"tomorrow\") + \"! 🎉\" : \"Next public holiday in \" + process.env.LOBSTER_ARG_COUNTRY + \": \" + next.name + \" in \" + d + \" days\" + (soon ? \", time to plan!\" : \"\"), body }))'"
+    },
+    {
+      "id": "send",
+      "workflow": "lib/notify.json",
+      "workflow_args": {
+        "title": "$plan.json.title",
+        "body": "$plan.json.body",
+        "level": "$plan.json.level",
+        "notify_channel": "${notify_channel}",
+        "notify_target": "${notify_target}"
+      }
+    }
+  ]
+}

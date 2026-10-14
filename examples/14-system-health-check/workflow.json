@@ -1,0 +1,78 @@
+{
+  "name": "system-health-check",
+  "description": "Check disk space, memory and CPU load on the machine OpenClaw runs on, list the biggest memory users, and alert when a limit is crossed (or recovers).",
+  "args": {
+    "disks": {
+      "default": "/",
+      "description": "Comma-separated mount points to check, e.g. '/, /Volumes/Data'"
+    },
+    "disk_pct": {
+      "default": "90",
+      "description": "Alert when a disk is fuller than this percentage"
+    },
+    "memory_pct": {
+      "default": "90",
+      "description": "Alert when memory in use is above this percentage"
+    },
+    "load_per_cpu": {
+      "default": "1.5",
+      "description": "Alert when the 5-minute load average per CPU core is above this"
+    },
+    "state_key": {
+      "default": "cookbook-system-health",
+      "description": "Where the last alert state is remembered"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for alerts (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "disks",
+      "run": "node -e 'const { execFileSync } = require(\"child_process\"); const out = []; for (const mount of process.env.LOBSTER_ARG_DISKS.split(\",\").map(d => d.trim()).filter(Boolean)) { try { const line = execFileSync(\"df\", [\"-kP\", mount], { encoding: \"utf8\", stdio: [\"ignore\", \"pipe\", \"pipe\"] }).trim().split(\"\\n\").pop().split(/\\s+/); const total = Number(line[1]), used = Number(line[2]), avail = Number(line[3]); out.push({ mount, totalGb: Math.round(total / 1048576 * 10) / 10, freeGb: Math.round(avail / 1048576 * 10) / 10, usedPct: Math.round(used / (used + avail) * 1000) / 10 }) } catch (e) { out.push({ mount, error: \"not found\" }) } } console.log(JSON.stringify(out))'"
+    },
+    {
+      "id": "memory",
+      "run": "node -e 'const os = require(\"os\"); const total = os.totalmem(); let available = os.freemem(); if (os.platform() === \"darwin\") { try { const vm = require(\"child_process\").execFileSync(\"vm_stat\", { encoding: \"utf8\" }); const page = Number((vm.match(/page size of (\\d+)/) || [])[1] || 4096); const pages = k => Number((vm.match(new RegExp(\"Pages \" + k + \":\\\\s+(\\\\d+)\")) || [])[1] || 0); available = (pages(\"free\") + pages(\"inactive\") + pages(\"speculative\") + pages(\"purgeable\")) * page } catch (e) {} } const cpus = os.cpus().length; const load = os.loadavg(); console.log(JSON.stringify({ totalGb: Math.round(total / 1073741824 * 10) / 10, usedPct: Math.round((1 - available / total) * 1000) / 10, cpus, load5: Math.round(load[1] * 100) / 100, loadPerCpu: Math.round(load[1] / cpus * 100) / 100, uptimeDays: Math.round(os.uptime() / 86400 * 10) / 10 }))'"
+    },
+    {
+      "id": "top",
+      "run": "ps -A -o rss=,comm= | sort -rn | head -5 | node -e 'const rows = require(\"fs\").readFileSync(0, \"utf8\").trim().split(\"\\n\").filter(Boolean).map(l => { const m = l.trim().match(/^(\\d+)\\s+(.*)$/); return { mb: Math.round(Number(m[1]) / 1024), name: m[2].split(\"/\").pop() } }); console.log(JSON.stringify(rows))'"
+    },
+    {
+      "id": "check",
+      "env": {
+        "DISKS": "$disks.stdout",
+        "MEM": "$memory.stdout",
+        "TOP": "$top.stdout"
+      },
+      "run": "node -e 'const disks = JSON.parse(process.env.DISKS); const mem = JSON.parse(process.env.MEM); const top = JSON.parse(process.env.TOP); const L = k => Number(process.env[\"LOBSTER_ARG_\" + k]); const problems = []; disks.forEach(d => { if (!d.error && d.usedPct > L(\"DISK_PCT\")) problems.push({ key: \"disk \" + d.mount, text: \"disk \" + d.mount + \" is \" + d.usedPct + \"% full (\" + d.freeGb + \" GB free)\" }) }); if (mem.usedPct > L(\"MEMORY_PCT\")) problems.push({ key: \"memory\", text: \"memory is \" + mem.usedPct + \"% used\" }); if (mem.loadPerCpu > L(\"LOAD_PER_CPU\")) problems.push({ key: \"cpu\", text: \"CPU load is \" + mem.loadPerCpu + \" per core\" }); const lines = [\"💾 Disks: \" + disks.map(d => d.error ? d.mount + \" (not found)\" : d.mount + \" \" + d.usedPct + \"% used, \" + d.freeGb + \" GB free\").join(\"; \"), \"🧠 Memory: \" + mem.usedPct + \"% of \" + mem.totalGb + \" GB used\", \"⚙️ Load (5 min): \" + mem.load5 + \" on \" + mem.cpus + \" cores (\" + mem.loadPerCpu + \" per core)\", \"🔝 Top memory: \" + top.map(p => p.name + \" \" + p.mb + \" MB\").join(\", \")]; console.log(JSON.stringify({ healthy: problems.length === 0, problems, report: lines.join(\"\\n\"), snapshot: { problems: problems.map(p => p.key).sort() } }))'"
+    },
+    {
+      "id": "changes",
+      "stdin": "$check.json.snapshot",
+      "pipeline": "diff.last --key ${state_key}"
+    },
+    {
+      "id": "report",
+      "env": {
+        "CHECK": "$check.stdout",
+        "DIFF": "$changes.stdout"
+      },
+      "run": "node -e 'const c = JSON.parse(process.env.CHECK); const raw = JSON.parse(process.env.DIFF); const d = Array.isArray(raw) ? raw[0] : raw; const before = (d.before && d.before.problems) || []; const after = (d.after && d.after.problems) || []; const fresh = c.problems.filter(p => !before.includes(p.key)); const fixed = before.filter(p => !after.includes(p)); const lines = []; fresh.forEach(p => lines.push(\"🔴 \" + p.text)); fixed.forEach(p => lines.push(\"✅ OK again: \" + p)); lines.push(c.healthy ? \"All checks within limits.\" : \"Still over the limit: \" + c.problems.length + \" check(s).\"); console.log(JSON.stringify({ alert: fresh.length + fixed.length > 0, message: lines.join(\"\\n\") + \"\\n\\n\" + c.report }))'"
+    },
+    {
+      "id": "notify",
+      "when": "$report.json.alert == true",
+      "env": {
+        "MSG": "$report.json.message"
+      },
+      "run": "if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

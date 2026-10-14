@@ -22,7 +22,7 @@ const STEP_KEYS = new Set([
 ]);
 const TOP_KEYS = new Set(["name", "description", "args", "env", "cwd", "steps", "cost_limit"]);
 const SECRET_PATTERNS = [/sk-[A-Za-z0-9]{20,}/, /gh[pousr]_[A-Za-z0-9]{30,}/, /xox[abpr]-[A-Za-z0-9-]{10,}/, /AKIA[0-9A-Z]{16}/];
-const STEP_REF = /\$([A-Za-z0-9_-]+)\.(json|stdout|approved|response|skipped|error)\b/g;
+const STEP_REF = /\$([A-Za-z0-9_-]+)\.(json|stdout|approved|response|skipped|errorMessage|error)\b/g;
 
 let failures = 0;
 let checks = 0;
@@ -101,44 +101,65 @@ const recipes = readdirSync(examplesDir, { withFileTypes: true })
 
 console.log(`Validating ${recipes.length} recipes\n`);
 
+// Every JSON file in a recipe folder that has "steps" is a workflow (workflow.json, plus
+// reusable sub-workflows such as lib/*.json). Other JSON files are sample data.
+function workflowFiles(dir, rel = "") {
+	const out = [];
+	for (const e of readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+		const r = path.join(rel, e.name);
+		if (e.isDirectory()) out.push(...workflowFiles(dir, r));
+		else if (e.name.endsWith(".json")) {
+			try {
+				if ("steps" in JSON.parse(readFileSync(path.join(dir, r), "utf8"))) out.push(r);
+			} catch {
+				out.push(r); // invalid JSON is reported below
+			}
+		}
+	}
+	return out;
+}
+
 for (const recipe of recipes) {
 	const dir = path.join(examplesDir, recipe);
-	const file = `${recipe}/workflow.json`;
 	const before = failures;
 
-	check(/^\d{2}-[a-z0-9-]+$/.test(recipe), file, "folder must be named NN-kebab-case");
-	for (const doc of ["README.md", "README.zh-CN.md"]) check(existsSync(path.join(dir, doc)), file, `missing ${doc}`);
+	check(/^\d{2}-[a-z0-9-]+$/.test(recipe), recipe, "folder must be named NN-kebab-case");
+	for (const doc of ["README.md", "README.zh-CN.md"]) check(existsSync(path.join(dir, doc)), recipe, `missing ${doc}`);
+	check(existsSync(path.join(dir, "workflow.json")), recipe, "missing workflow.json");
 
-	let raw = "";
-	let wf;
-	try {
-		raw = readFileSync(path.join(dir, "workflow.json"), "utf8");
-		wf = JSON.parse(raw);
-	} catch (err) {
-		check(false, file, `not valid JSON: ${err.message}`);
-		continue;
-	}
-
-	for (const key of Object.keys(wf)) check(TOP_KEYS.has(key), file, `unknown top-level field "${key}"`);
-	check(typeof wf.name === "string" && wf.name.length > 0, file, "missing name");
-	check(typeof wf.description === "string" && wf.description.length > 20, file, "missing or too short description");
-	check(Array.isArray(wf.steps) && wf.steps.length > 0, file, "missing steps");
-	const args = wf.args ?? {};
-	for (const [name, spec] of Object.entries(args)) {
-		check(/^[a-z][a-z0-9_]*$/.test(name), file, `arg "${name}" should be snake_case`);
-		check(spec && spec.default !== undefined, file, `arg "${name}" needs a default so the recipe runs as-is`);
-		check(spec && typeof spec.description === "string", file, `arg "${name}" needs a description`);
-	}
-	if (Array.isArray(wf.steps)) validateSteps(wf.steps, file, args, new Set(), "");
-
-	for (const pattern of SECRET_PATTERNS) check(!pattern.test(raw), file, `looks like it contains a secret (${pattern})`);
-
-	if (existsSync(lobsterBin)) {
+	for (const rel of workflowFiles(dir)) {
+		const file = `${recipe}/${rel}`;
+		let raw = "";
+		let wf;
 		try {
-			execFileSync(lobsterBin, ["run", "--dry-run", "--file", path.join(dir, "workflow.json")], { stdio: "pipe", cwd: root });
-			checks += 1;
+			raw = readFileSync(path.join(dir, rel), "utf8");
+			wf = JSON.parse(raw);
 		} catch (err) {
-			check(false, file, `lobster --dry-run failed: ${String(err.stderr || err.message).trim().split("\n").pop()}`);
+			check(false, file, `not valid JSON: ${err.message}`);
+			continue;
+		}
+
+		for (const key of Object.keys(wf)) check(TOP_KEYS.has(key), file, `unknown top-level field "${key}"`);
+		check(typeof wf.name === "string" && wf.name.length > 0, file, "missing name");
+		check(typeof wf.description === "string" && wf.description.length > 20, file, "missing or too short description");
+		check(Array.isArray(wf.steps) && wf.steps.length > 0, file, "missing steps");
+		const args = wf.args ?? {};
+		for (const [name, spec] of Object.entries(args)) {
+			check(/^[a-z][a-z0-9_]*$/.test(name), file, `arg "${name}" should be snake_case`);
+			check(spec && spec.default !== undefined, file, `arg "${name}" needs a default so the recipe runs as-is`);
+			check(spec && typeof spec.description === "string", file, `arg "${name}" needs a description`);
+		}
+		if (Array.isArray(wf.steps)) validateSteps(wf.steps, file, args, new Set(), "");
+
+		for (const pattern of SECRET_PATTERNS) check(!pattern.test(raw), file, `looks like it contains a secret (${pattern})`);
+
+		if (existsSync(lobsterBin)) {
+			try {
+				execFileSync(lobsterBin, ["run", "--dry-run", "--file", path.join(dir, rel)], { stdio: "pipe", cwd: root });
+				checks += 1;
+			} catch (err) {
+				check(false, file, `lobster --dry-run failed: ${String(err.stderr || err.message).trim().split("\n").pop()}`);
+			}
 		}
 	}
 

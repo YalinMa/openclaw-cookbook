@@ -40,10 +40,10 @@ const env = {
 
 // ---------- helpers ----------
 
-const wf = (recipe) => path.join(root, "examples", recipe, "workflow.json");
+const wf = (recipe, file = "workflow.json") => path.join(root, "examples", recipe, file);
 
-function lobsterCall(args) {
-	const res = spawnSync(lobster, args, { cwd: root, env, encoding: "utf8", timeout: 180000 });
+function lobsterCall(args, extraEnv = {}) {
+	const res = spawnSync(lobster, args, { cwd: root, env: { ...env, ...extraEnv }, encoding: "utf8", timeout: 180000 });
 	const out = res.stdout.trim();
 	try {
 		return JSON.parse(out);
@@ -52,10 +52,17 @@ function lobsterCall(args) {
 	}
 }
 
-function run(recipe, args = {}) {
-	const result = lobsterCall(["run", "--mode", "tool", "--file", wf(recipe), "--args-json", JSON.stringify(args)]);
+function run(recipe, args = {}, { file = "workflow.json", extraEnv = {} } = {}) {
+	const result = lobsterCall(["run", "--mode", "tool", "--file", wf(recipe, file), "--args-json", JSON.stringify(args)], extraEnv);
 	if (!result.ok) throw new Error(`run failed: ${result.error?.message?.slice(-500)}`);
 	return result;
+}
+
+// For runs that are expected to fail: returns the error message.
+function runError(recipe, args = {}, { extraEnv = {} } = {}) {
+	const result = lobsterCall(["run", "--mode", "tool", "--file", wf(recipe), "--args-json", JSON.stringify(args)], extraEnv);
+	if (result.ok) throw new Error(`expected the run to fail, got status ${result.status}: ${JSON.stringify(result.output).slice(0, 200)}`);
+	return result.error.message;
 }
 
 function resume(result, decision) {
@@ -219,6 +226,148 @@ test("10-morning-brief", "parallel sources + sub-workflow + LLM", () => {
 	const r = run("10-morning-brief", { city: "Shanghai", latitude: "31.23", longitude: "121.47" });
 	const t = text(r);
 	expect(t.length > 50 && /🔗 Links\n1\. /.test(t), t);
+});
+
+// ---------- recipes 11–20 ----------
+
+test("11-rss-reading-list", "adds new articles to the Markdown file", () => {
+	const output_file = path.join(tmp, "reading-list.md");
+	const r = run("11-rss-reading-list", { output_file, max_items: "3", feeds: "https://feeds.bbci.co.uk/news/technology/rss.xml, https://blog.rust-lang.org/feed.xml" });
+	expect(/📚 3 new articles added/.test(text(r)), text(r));
+	const md = readFileSync(output_file, "utf8");
+	expect(/^# Reading list\n\n## \d{4}-\d\d-\d\d \(3 new\)\n\n- \[ \] \[.+\]\(https?:\/\//.test(md), md);
+});
+test("11-rss-reading-list", "2nd run skips articles already seen", () => {
+	const r = run("11-rss-reading-list", { output_file: path.join(tmp, "reading-list.md"), max_items: "500", feeds: "https://blog.rust-lang.org/feed.xml" });
+	// The Rust feed was fully read in the 1st run (only 3 were added, but all were remembered as seen).
+	expect(r.output[0].added === 0 && /No new articles/.test(r.output[0].message), text(r));
+});
+test("11-rss-reading-list", "a broken feed is reported, not fatal", () => {
+	const r = run("11-rss-reading-list", { output_file: path.join(tmp, "rl2.md"), state_key: "t11b", feeds: "https://this-site-does-not-exist.invalid/feed, https://feeds.bbci.co.uk/news/technology/rss.xml" });
+	expect(/⚠️ Could not read https:\/\/this-site-does-not-exist\.invalid\/feed/.test(text(r)), text(r));
+});
+
+test("12-price-threshold-alert", "1st run alerts on rules that are true", () => {
+	const r = run("12-price-threshold-alert", { notify_channel: "telegram", notify_target: "@prices" });
+	expect(/🔔 BTC-USD is [\d,.]+ USD, rule “BTC-USD > 1” is now true/.test(text(r)), text(r));
+	expect(/▫️ ETH-USD < 1 \(now [\d,.]+\)/.test(text(r)), text(r));
+	expect(/\[--target\] \[@prices\] \[--message\] \[🔔/.test(calls()), "no alert sent");
+});
+test("12-price-threshold-alert", "2nd run stays quiet", () => {
+	const r = run("12-price-threshold-alert");
+	expect(r.output[0].alert === false, text(r));
+});
+test("12-price-threshold-alert", "cleared rules, bad pairs and bad rules are reported", () => {
+	const r = run("12-price-threshold-alert", { rules: "ETH-USD < 1, FOO-BAR > 5, nonsense" });
+	const t = r.output[0].message;
+	expect(/↩️ “BTC-USD > 1” is no longer true/.test(t) && /⚠️ FOO-BAR > 5 \(HTTP 404\)/.test(t) && /Could not understand rule: nonsense/.test(t), t);
+});
+
+test("13-git-daily-standup", "summarises recent commits", () => {
+	const repo = path.join(tmp, "demo-repo");
+	mkdirSync(repo);
+	const git = (...a) => spawnSync("git", ["-C", repo, ...a], { encoding: "utf8" });
+	git("init", "-q");
+	writeFileSync(path.join(repo, "a.txt"), "a\n");
+	git("add", ".");
+	git("-c", "user.name=Ada", "-c", "user.email=ada@example.com", "commit", "-qm", "Add login form validation");
+	git("-c", "user.name=Bob", "-c", "user.email=bob@example.com", "commit", "-q", "--allow-empty", "-m", "Bump version to 1.2.0");
+	const r = run("13-git-daily-standup", { repo });
+	expect(/🧑‍💻 Standup — demo-repo/.test(text(r)) && /Commits since 1 day ago: 2 · \+1 \/ -0 lines/.test(text(r)) && /Add login form validation \(Ada,/.test(text(r)), text(r));
+	const bob = run("13-git-daily-standup", { repo, author: "Bob" });
+	expect(/Commits since 1 day ago: 1 /.test(text(bob)) && !/Ada/.test(text(bob)), text(bob));
+});
+test("13-git-daily-standup", "quiet day and non-repo folder", () => {
+	const r = run("13-git-daily-standup", { repo: path.join(tmp, "demo-repo"), since: "2099-01-01" });
+	expect(/No commits in demo-repo since 2099-01-01/.test(text(r)), text(r));
+	expect(/Not a git repository/.test(runError("13-git-daily-standup", { repo: os.tmpdir() })), "expected a clear error");
+});
+
+test("14-system-health-check", "alerts once when limits are crossed, then on recovery", () => {
+	const strict = { disk_pct: "0", memory_pct: "0", load_per_cpu: "-1" };
+	const a = run("14-system-health-check", strict);
+	expect(/🔴 disk \/ is [\d.]+% full/.test(text(a)) && /🔴 memory is/.test(text(a)) && /🔴 CPU load is/.test(text(a)), text(a));
+	const b = run("14-system-health-check", strict);
+	expect(b.output[0].alert === false, text(b));
+	const c = run("14-system-health-check", { disk_pct: "100", memory_pct: "100", load_per_cpu: "1000" });
+	expect(/✅ OK again: memory/.test(text(c)) && /All checks within limits/.test(text(c)), text(c));
+});
+
+test("15-reusable-subworkflows", "holiday reminder built from lib/ sub-workflows", () => {
+	const r = run("15-reusable-subworkflows", { country: "US", remind_days: "400", notify_channel: "slack", notify_target: "channel:C15" });
+	expect(/^⚠️ Next public holiday in US: .+ in \d+ days, time to plan!\n• /.test(text(r)) || /^✅ .+ starts (today|tomorrow)/.test(text(r)), text(r));
+	expect(/\[channel:C15\] \[--message\] \[(⚠️|✅) /.test(calls()), "lib/notify did not send");
+});
+test("15-reusable-subworkflows", "lib/notify works on its own", () => {
+	const r = run("15-reusable-subworkflows", { title: "Deploy done", body: "v1.2 is live", level: "success" }, { file: "lib/notify.json" });
+	expect(text(r).trim() === "✅ Deploy done\nv1.2 is live", text(r));
+});
+
+test("16-resilient-api-fallback", "primary API works", () => {
+	const r = run("16-resilient-api-fallback");
+	expect(/^💱 1 USD = [\d.]+ EUR · [\d.]+ CNY/.test(text(r)) && /Source: open\.er-api\.com/.test(text(r)), text(r));
+});
+test("16-resilient-api-fallback", "falls back when the primary is down", () => {
+	const r = run("16-resilient-api-fallback", { primary_url: "https://this-site-does-not-exist.invalid/" });
+	expect(/Source: frankfurter\.dev, .*backup API used, primary failed: no response/.test(text(r)), text(r));
+});
+test("16-resilient-api-fallback", "clear error when both are down; sanity check blocks bad data", () => {
+	const err = runError("16-resilient-api-fallback", { primary_url: "https://this-site-does-not-exist.invalid/", fallback_url: "https://also-not-there.invalid/" });
+	expect(/Both APIs failed\. Primary: no response .*Backup: no response/.test(err), err);
+	const r = run("16-resilient-api-fallback", { symbols: "EUR,XYZ" });
+	expect(/failed the sanity check, nothing was sent: missing or invalid rates for XYZ/.test(text(r)), text(r));
+});
+
+test("17-csv-contact-cleaner", "cleans, merges and rejects", () => {
+	const output_dir = path.join(tmp, "contacts");
+	const r = run("17-csv-contact-cleaner", { output_dir });
+	const t = text(r);
+	expect(/Cleaned 10 rows → 6 contacts/.test(t) && /merged 2 duplicate/.test(t) && /line 5: invalid email/.test(t) && /line 7: missing name/.test(t), t);
+	const csv = readFileSync(path.join(output_dir, "contacts.clean.csv"), "utf8");
+	expect(csv.includes('Ada Lovelace,ada@example.com,+442079460958,"Analytical Engines, Ltd",London,'), csv);
+	expect(csv.includes('"Lin, Mei",mei.lin@example.cn,13800138000,"Example ""Tech"" Co",Shanghai,'), csv);
+	expect(csv.includes("Linus Torvalds,linus@kernel.example,,Linux Foundation,Portland,phone unreadable: not available"), csv);
+});
+
+test("18-blog-to-social-posts", "draft → pick + edit → approve → published", () => {
+	const drafts_file = path.join(tmp, "posts.md");
+	const r = run("18-blog-to-social-posts", { drafts_file, notify_channel: "slack", notify_target: "channel:C18" });
+	expect(r.status === "needs_input" && /^Drafts for: .+/.test(r.requiresInput.subject[0]), JSON.stringify(r.requiresInput?.subject));
+	const picked = resume(r, { pick: 1, edited_text: "My own words about the new trait solver." });
+	expect(picked.status === "needs_approval" && picked.requiresApproval.items.includes("My own words about the new trait solver."), JSON.stringify(picked.requiresApproval?.items));
+	const done = resume(picked, true);
+	expect(/✅ Published to slack/.test(text(done)), text(done));
+	expect(/My own words about the new trait solver\.\n\nhttps:\/\/blog\.rust-lang\.org\//.test(readFileSync(drafts_file, "utf8")), "drafts file not written");
+	expect(/\[channel:C18\] \[--message\] \[My own words/.test(calls()), "post not published");
+});
+test("18-blog-to-social-posts", "rejecting publishes nothing", () => {
+	const drafts_file = path.join(tmp, "posts-rejected.md");
+	const r = run("18-blog-to-social-posts", { drafts_file });
+	const done = resume(resume(r, { pick: 1 }), false);
+	expect(done.status === "cancelled" && !existsSync(drafts_file), `status ${done.status}`);
+});
+
+test("19-batch-geocoder", "geocodes a list with pauses, reports misses", () => {
+	const input_file = path.join(tmp, "places.txt");
+	writeFileSync(input_file, "# test\nBerlin\nSpringfield, US\nXyzzy Nowhereville\n");
+	const output_file = path.join(tmp, "geo.csv");
+	const r = run("19-batch-geocoder", { input_file, output_file });
+	expect(/Geocoded 2 of 3 places/.test(text(r)) && /❓ Not found: Xyzzy Nowhereville/.test(text(r)), text(r));
+	const csv = readFileSync(output_file, "utf8").split("\n");
+	expect(csv[0] === "query,found,name,region,country,lat,lon,timezone,population" && /^Springfield, US|^"Springfield, US",true,Springfield,.*,United States,/.test(csv[2]), csv.join("\n"));
+});
+
+test("20-expense-categorizer", "report with correct totals; saved rules skip the LLM", () => {
+	const report_file = path.join(tmp, "spending.md");
+	const a = run("20-expense-categorizer", { report_file });
+	expect(/💸 Spent 2,624\.12 EUR · income 4,200\.00 EUR · left 1,575\.88 EUR/.test(text(a)) && /0 categorised by saved rules, 16 new merchant\(s\) sent to the LLM/.test(text(a)), text(a));
+	expect(/^# Spending report 2026-09-01 → 2026-09-28/.test(readFileSync(report_file, "utf8")), "report not written");
+	const b = run("20-expense-categorizer", { report_file });
+	expect(/[1-9]\d* categorised by saved rules/.test(text(b)), text(b));
+});
+test("20-expense-categorizer", "cost_limit stops an over-budget run", () => {
+	const err = runError("20-expense-categorizer", { report_file: path.join(tmp, "never.md"), state_key: "t20b" }, { extraEnv: { LOBSTER_LLM_PRICING_JSON: JSON.stringify({ mock: { input: 1e7, output: 1e7 } }), LOBSTER_CACHE_DIR: path.join(tmp, "cache-cost") } });
+	expect(/Cost limit exceeded/.test(err) && !existsSync(path.join(tmp, "never.md")), err);
 });
 
 // ---------- runner ----------

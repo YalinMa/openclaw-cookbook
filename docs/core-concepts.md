@@ -41,12 +41,12 @@ The best combination: the agent starts a workflow with **one tool call** (instea
 | Kind | What it does | Recipe |
 |---|---|---|
 | `run` | A shell command (`/bin/sh`). Whatever it prints is the step's output. | all |
-| `pipeline` | A built-in Lobster command: `llm.invoke`, `diff.last`, `state.get`, `state.set`… | 03, 04, 05 |
-| `approval` | Pause for a yes/no decision. | 06, 07 |
-| `input` | Pause and ask a question; the answer must match a JSON Schema. | 08 |
-| `for_each` | Run sub-steps once per item of an array. | 03, 04, 06 |
+| `pipeline` | A built-in Lobster command: `llm.invoke`, `diff.last`, `state.get`, `state.set`… | 03, 04, 05, 11, 12, 20 |
+| `approval` | Pause for a yes/no decision. | 06, 07, 18 |
+| `input` | Pause and ask a question; the answer must match a JSON Schema. | 08, 18 |
+| `for_each` | Run sub-steps once per item of an array. | 03, 04, 06, 11, 12, 19 |
 | `parallel` | Run several branches at the same time. | 10 |
-| `workflow` | Run another workflow file as one step. | 10 |
+| `workflow` | Run another workflow file as one step. | 10, 15 |
 
 ## 4. Passing data between steps
 
@@ -56,6 +56,7 @@ Each finished step has:
 - `$id.json`: the same, parsed as JSON (if it was valid JSON)
 - `$id.json.some.field`: drill into JSON, including array indexes (`$id.json.items.0.name`)
 - `$id.approved` (approval steps), `$id.response` (input steps), `$id.skipped`
+- `$id.error` and `$id.errorMessage` (a step that failed with `on_error: "continue"`)
 
 Hand data to a step in one of two **safe** ways:
 
@@ -132,6 +133,7 @@ State lives in `~/.lobster/state` (override with `LOBSTER_STATE_DIR`).
 - The input (`stdin`) is sent along with the prompt.
 - With `--output-schema`, the answer is validated, retried once if it doesn't match, and available at `$pick.json.output.data`. Without a schema, the text is at `$pick.json.output.text`.
 - Answers are cached by prompt + input, so re-runs and resumes don't pay twice.
+- Put a budget on a whole workflow with `"cost_limit": { "max_usd": 0.05, "action": "stop" }` (set `LOBSTER_LLM_PRICING_JSON` for models Lobster doesn't know). Batch items into one call, and save answers as rules so they aren't asked again ([recipe 20](../examples/20-expense-categorizer/)).
 - Where the request goes depends on `LOBSTER_LLM_PROVIDER` (`openclaw` or `http`), see [Getting Started §4](getting-started.md#4-connect-an-llm-for-ai-recipes).
 - Pattern used throughout: **the LLM decides, code formats.** Let the model classify, pick or write, and add facts (URLs, numbers) from the source data in a normal step.
 
@@ -141,8 +143,11 @@ State lives in `~/.lobster/state` (override with `LOBSTER_STATE_DIR`).
 |---|---|
 | Retries | `"retry": { "max": 3, "backoff": "exponential", "delay_ms": 2000 }` ([02](../examples/02-daily-weather-briefing/)) |
 | Timeouts | `"timeout_ms": 60000` per step; `timeoutMs` for the whole run in the tool call |
-| Keep going on error | `"on_error": "continue"` (the step gets `error: true`) or `"skip_rest"` |
+| Keep going on error | `"on_error": "continue"` (the step gets `error: true` and `errorMessage`), then branch with `when` ([16](../examples/16-resilient-api-fallback/)). `"skip_rest"` ends the run silently. |
 | Errors as data | Catch failures inside the step and print `{"error": "..."}` ([03](../examples/03-website-uptime-monitor/), [04](../examples/04-github-release-watcher/)) |
 | Reversible actions | Move instead of delete, write an undo script ([07](../examples/07-safe-file-cleanup/)) |
-| Validate input | Treat external data as untrusted ([09](../examples/09-webhook-lead-capture/)) |
+| Validate input | Treat external data as untrusted ([09](../examples/09-webhook-lead-capture/), [17](../examples/17-csv-contact-cleaner/)) |
+| Fallbacks | A backup source when the main one fails ([16](../examples/16-resilient-api-fallback/)) |
+| Rate limits | `batch_size` + `pause_ms` on loops, and wait-and-retry on HTTP 429 ([19](../examples/19-batch-geocoder/)) |
+| Reuse | Put shared logic in sub-workflows ([15](../examples/15-reusable-subworkflows/)) |
 | Inspect before running | `npx lobster run --dry-run --file …` and `npx lobster graph --file …` |

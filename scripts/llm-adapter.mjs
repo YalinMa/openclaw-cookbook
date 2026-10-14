@@ -131,7 +131,12 @@ const server = http.createServer(async (req, res) => {
 	for await (const chunk of req) raw += chunk;
 	try {
 		const payload = JSON.parse(raw);
-		if (MOCK) return send(200, { ok: true, result: { output: mockAnswer(payload), model: "mock" } });
+		if (MOCK) {
+			// Rough token estimate (≈4 characters per token) so cost tracking and cost_limit can be tested.
+			const output = mockAnswer(payload);
+			const usage = { inputTokens: Math.ceil(raw.length / 4), outputTokens: Math.ceil(JSON.stringify(output).length / 4) };
+			return send(200, { ok: true, result: { output, model: "mock", usage } });
+		}
 		return send(200, { ok: true, result: await realAnswer(payload) });
 	} catch (err) {
 		return send(200, { ok: false, error: { message: String(err?.message ?? err) } });

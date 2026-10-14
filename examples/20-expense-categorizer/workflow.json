@@ -1,0 +1,75 @@
+{
+  "name": "expense-categorizer",
+  "description": "Categorise bank transactions from a CSV export: merchants seen before use saved rules, only new merchants go to the LLM (in one batched call, with a cost limit), then write a monthly spending report.",
+  "args": {
+    "input_file": {
+      "default": "examples/20-expense-categorizer/transactions.csv",
+      "description": "CSV with columns date, description, amount (negative = money out)"
+    },
+    "categories": {
+      "default": "Groceries, Eating out, Transport, Housing, Utilities, Subscriptions, Shopping, Health, Entertainment, Travel, Income, Savings & transfers, Other",
+      "description": "The categories the LLM may choose from"
+    },
+    "currency": {
+      "default": "EUR",
+      "description": "Currency label used in the report"
+    },
+    "report_file": {
+      "default": "~/openclaw-cookbook-output/spending-report.md",
+      "description": "Where the Markdown report is written"
+    },
+    "state_key": {
+      "default": "cookbook-expense-rules",
+      "description": "Where merchant → category rules are remembered between runs"
+    }
+  },
+  "cost_limit": {
+    "max_usd": 0.05,
+    "action": "stop"
+  },
+  "steps": [
+    {
+      "id": "load",
+      "run": "node -e 'const file = process.env.LOBSTER_ARG_INPUT_FILE.replace(/^~(?=\\/|$)/, require(\"os\").homedir()); const lines = require(\"fs\").readFileSync(file, \"utf8\").replace(/^\\uFEFF/, \"\").split(/\\r?\\n/).filter(l => l.trim()); const header = lines.shift().toLowerCase().split(\",\").map(h => h.trim()); const at = n => header.indexOf(n); if (at(\"date\") < 0 || at(\"description\") < 0 || at(\"amount\") < 0) throw new Error(\"CSV needs date, description and amount columns, found: \" + header.join(\", \")); const rows = lines.map((l, i) => { const cells = l.match(/(\\x22([^\\x22]|\\x22\\x22)*\\x22|[^,]*)(,|$)/g).map(c => c.replace(/,$/, \"\").replace(/^\\x22|\\x22$/g, \"\").replace(/\\x22\\x22/g, \"\\x22\").trim()); const description = cells[at(\"description\")]; const merchant = description.toUpperCase().replace(/[0-9*#.\\-\\/]+/g, \" \").replace(/\\b(SAGT|DANKE|PMTS|COM|GMBH|LTD|HELP)\\b/g, \" \").replace(/\\s+/g, \" \").trim().split(\" \").slice(0, 2).join(\" \"); return { i: i + 1, date: cells[at(\"date\")], description, amount: Number(cells[at(\"amount\")]), merchant } }).filter(r => !Number.isNaN(r.amount)); console.log(JSON.stringify(rows))'"
+    },
+    {
+      "id": "rules",
+      "pipeline": "state.get ${state_key}"
+    },
+    {
+      "id": "split",
+      "env": {
+        "RULES": "$rules.stdout"
+      },
+      "stdin": "$load.json",
+      "run": "node -e 'const rows = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); let saved = JSON.parse(process.env.RULES || \"null\"); if (Array.isArray(saved)) saved = saved[0]; const rules = (saved && saved.rules) || {}; const known = rows.filter(r => rules[r.merchant]); const seen = new Set(); const unknown = rows.filter(r => !rules[r.merchant] && !seen.has(r.merchant) && seen.add(r.merchant)).map(r => ({ i: r.i, description: r.description, amount: r.amount })); console.log(JSON.stringify({ rules, knownCount: known.length, unknownMerchants: unknown.length, unknown }))'"
+    },
+    {
+      "id": "ai",
+      "when": "$split.json.unknownMerchants > 0",
+      "stdin": "$split.json.unknown",
+      "pipeline": "llm.invoke --temperature 0 --prompt 'Categorise each bank transaction (negative amount = money spent, positive = money received). Allowed categories, use exactly one of these names: ${categories}. Return one entry per input transaction with its number i.' --output-schema '{\"type\":\"object\",\"properties\":{\"items\":{\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"object\",\"properties\":{\"i\":{\"type\":\"integer\"},\"category\":{\"type\":\"string\"}},\"required\":[\"i\",\"category\"]}}},\"required\":[\"items\"]}'"
+    },
+    {
+      "id": "merge",
+      "env": {
+        "ROWS": "$load.stdout",
+        "SPLIT": "$split.stdout",
+        "AI": "$ai.json.output.data"
+      },
+      "run": "node -e 'const rows = JSON.parse(process.env.ROWS); const s = JSON.parse(process.env.SPLIT); const ai = process.env.AI ? JSON.parse(process.env.AI) : { items: [] }; const allowed = process.env.LOBSTER_ARG_CATEGORIES.split(\",\").map(c => c.trim()); const fix = c => allowed.find(a => a.toLowerCase() === String(c || \"\").trim().toLowerCase()) || \"Other\"; const rules = Object.assign({}, s.rules); const learned = {}; for (const x of ai.items) { const row = rows.find(r => r.i === x.i); if (row && !rules[row.merchant]) { rules[row.merchant] = fix(x.category); learned[row.merchant] = rules[row.merchant] } } const out = rows.map(r => Object.assign({}, r, { category: rules[r.merchant] || \"Other\", source: learned[r.merchant] ? \"ai\" : s.rules[r.merchant] ? \"rule\" : \"fallback\" })); console.log(JSON.stringify({ rows: out, learned, state: { rules }, fromRules: s.knownCount, sentToAi: s.unknownMerchants }))'"
+    },
+    {
+      "id": "save_rules",
+      "stdin": "$merge.json.state",
+      "pipeline": "state.set ${state_key}"
+    },
+    {
+      "id": "report",
+      "env": {
+        "DATA": "$merge.stdout"
+      },
+      "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const d = JSON.parse(process.env.DATA); const cur = process.env.LOBSTER_ARG_CURRENCY; const money = n => n.toLocaleString(\"en-US\", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + \" \" + cur; const income = d.rows.filter(r => r.amount > 0).reduce((s, r) => s + r.amount, 0); const spent = d.rows.filter(r => r.amount < 0).reduce((s, r) => s - r.amount, 0); const byCat = {}; d.rows.filter(r => r.amount < 0).forEach(r => { byCat[r.category] = (byCat[r.category] || 0) - r.amount }); const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]); const max = cats.length ? cats[0][1] : 1; const dates = d.rows.map(r => r.date).sort(); const md = [\"# Spending report \" + dates[0] + \" → \" + dates[dates.length - 1], \"\", \"| | |\", \"|---|---|\", \"| Income | \" + money(income) + \" |\", \"| Spent | \" + money(spent) + \" |\", \"| Left over | \" + money(income - spent) + \" |\", \"\", \"## By category\", \"\", \"| Category | Amount | Share | |\", \"|---|---:|---:|---|\"]; cats.forEach(([c, v]) => md.push(\"| \" + c + \" | \" + money(v) + \" | \" + Math.round(v / spent * 100) + \"% | \" + \"█\".repeat(Math.max(1, Math.round(v / max * 20))) + \" |\")); md.push(\"\", \"## Transactions\", \"\", \"| Date | Description | Amount | Category | How |\", \"|---|---|---:|---|---|\"); d.rows.forEach(r => md.push(\"| \" + r.date + \" | \" + r.description.replace(/\\|/g, \"/\") + \" | \" + money(r.amount) + \" | \" + r.category + \" | \" + r.source + \" |\")); const file = process.env.LOBSTER_ARG_REPORT_FILE.replace(/^~(?=\\/|$)/, require(\"os\").homedir()); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, md.join(\"\\n\") + \"\\n\"); const lines = [\"💸 Spent \" + money(spent) + \" · income \" + money(income) + \" · left \" + money(income - spent)]; cats.slice(0, 6).forEach(([c, v]) => lines.push(\"• \" + c + \": \" + money(v) + \" (\" + Math.round(v / spent * 100) + \"%)\")); lines.push(\"\", d.rows.length + \" transactions: \" + d.fromRules + \" categorised by saved rules, \" + d.sentToAi + \" new merchant(s) sent to the LLM.\", \"Report: \" + file); console.log(lines.join(\"\\n\"))'"
+    }
+  ]
+}

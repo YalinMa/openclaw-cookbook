@@ -1,0 +1,72 @@
+{
+  "name": "price-threshold-alert",
+  "description": "Watch prices (crypto or currencies via Coinbase's free API) and alert once when a rule like 'BTC-USD > 100000' starts being true, not on every check.",
+  "args": {
+    "rules": {
+      "default": "BTC-USD > 1, ETH-USD < 1, BTC-EUR >= 1",
+      "description": "Comma-separated rules: PAIR OPERATOR NUMBER, operators > < >= <=. Pairs use Coinbase names like BTC-USD, ETH-EUR, SOL-USD."
+    },
+    "state_key": {
+      "default": "cookbook-price-alerts",
+      "description": "Where the currently triggered rules are remembered"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for alerts (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "rules",
+      "run": "node -e 'const rules = []; const errors = []; for (const raw of process.env.LOBSTER_ARG_RULES.split(\",\").map(r => r.trim()).filter(Boolean)) { const m = raw.match(/^([A-Za-z0-9]+-[A-Za-z]+)\\s*(>=|<=|>|<)\\s*([0-9]+(?:\\.[0-9]+)?)$/); if (!m) { errors.push(raw); continue } rules.push({ rule: m[1].toUpperCase() + \" \" + m[2] + \" \" + m[3], pair: m[1].toUpperCase(), op: m[2], limit: Number(m[3]) }) } if (!rules.length) throw new Error(\"No valid rules. Use e.g. BTC-USD > 100000\"); const pairs = [...new Set(rules.map(r => r.pair))].map(pair => ({ pair })); console.log(JSON.stringify({ rules, errors, pairs }))'"
+    },
+    {
+      "id": "prices",
+      "for_each": "$rules.json.pairs",
+      "item_var": "p",
+      "pause_ms": 300,
+      "steps": [
+        {
+          "id": "spot",
+          "env": {
+            "PAIR": "$p.json.pair"
+          },
+          "run": "node -e 'const pair = process.env.PAIR; fetch(\"https://api.coinbase.com/v2/prices/\" + pair + \"/spot\", { headers: { \"User-Agent\": \"openclaw-cookbook\" }, signal: AbortSignal.timeout(15000) }).then(async r => { const b = await r.json().catch(() => ({})); return r.ok && b.data ? { pair, price: Number(b.data.amount), currency: b.data.currency } : { pair, error: \"HTTP \" + r.status } }, e => ({ pair, error: String(e.name) })).then(x => console.log(JSON.stringify(x)))'"
+        }
+      ]
+    },
+    {
+      "id": "evaluate",
+      "env": {
+        "RULES": "$rules.stdout"
+      },
+      "stdin": "$prices.json",
+      "run": "node -e 'const r = JSON.parse(process.env.RULES); const prices = {}; JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")).forEach(x => { prices[x.spot.pair] = x.spot }); const test = { \">\": (a, b) => a > b, \"<\": (a, b) => a < b, \">=\": (a, b) => a >= b, \"<=\": (a, b) => a <= b }; const results = r.rules.map(rule => { const p = prices[rule.pair]; if (!p || p.error) return Object.assign({}, rule, { error: (p && p.error) || \"no price\" }); return Object.assign({}, rule, { price: p.price, currency: p.currency, triggered: test[rule.op](p.price, rule.limit) }) }); const triggered = results.filter(x => x.triggered).map(x => x.rule).sort(); console.log(JSON.stringify({ results, invalid: r.errors, snapshot: { triggered } }))'"
+    },
+    {
+      "id": "changes",
+      "stdin": "$evaluate.json.snapshot",
+      "pipeline": "diff.last --key ${state_key}"
+    },
+    {
+      "id": "report",
+      "env": {
+        "EVAL": "$evaluate.stdout",
+        "DIFF": "$changes.stdout"
+      },
+      "run": "node -e 'const e = JSON.parse(process.env.EVAL); const raw = JSON.parse(process.env.DIFF); const d = Array.isArray(raw) ? raw[0] : raw; const before = (d.before && d.before.triggered) || []; const after = (d.after && d.after.triggered) || []; const fmt = n => n.toLocaleString(\"en-US\", { maximumFractionDigits: 2 }); const byRule = Object.fromEntries(e.results.map(x => [x.rule, x])); const lines = []; after.filter(x => !before.includes(x)).forEach(rule => { const x = byRule[rule]; lines.push(\"🔔 \" + x.pair + \" is \" + fmt(x.price) + \" \" + x.currency + \", rule \\u201c\" + rule + \"\\u201d is now true\") }); const fired = lines.length; before.filter(x => !after.includes(x)).forEach(rule => lines.push(\"↩️ \\u201c\" + rule + \"\\u201d is no longer true\")); const status = e.results.map(x => (x.error ? \"⚠️ \" : x.triggered ? \"✅ \" : \"▫️ \") + x.rule + (x.error ? \" (\" + x.error + \")\" : \" (now \" + fmt(x.price) + \")\")); e.invalid.forEach(x => status.push(\"⚠️ Could not understand rule: \" + x)); console.log(JSON.stringify({ alert: fired > 0, message: (lines.length ? lines.join(\"\\n\") + \"\\n\\n\" : \"\") + status.join(\"\\n\"), results: e.results }))'"
+    },
+    {
+      "id": "notify",
+      "when": "$report.json.alert == true",
+      "env": {
+        "MSG": "$report.json.message"
+      },
+      "run": "if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

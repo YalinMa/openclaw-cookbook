@@ -1,0 +1,37 @@
+{
+  "name": "lib-notify",
+  "description": "Reusable building block: format a message with a level icon and, if a channel is given, send it with openclaw message send. Always returns the text.",
+  "args": {
+    "title": {
+      "default": "Hello",
+      "description": "First line of the message"
+    },
+    "body": {
+      "default": "",
+      "description": "Message body (any text)"
+    },
+    "level": {
+      "default": "info",
+      "description": "info, success, warning or alert: picks the icon"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "OpenClaw channel (telegram, slack, discord, feishu...). Empty = don't send, just return the text."
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "format",
+      "run": "node -e 'const icons = { info: \"ℹ️\", success: \"✅\", warning: \"⚠️\", alert: \"🚨\" }; const icon = icons[process.env.LOBSTER_ARG_LEVEL] || icons.info; const body = process.env.LOBSTER_ARG_BODY.trim(); console.log(icon + \" \" + process.env.LOBSTER_ARG_TITLE + (body ? \"\\n\" + body : \"\"))'"
+    },
+    {
+      "id": "send",
+      "stdin": "$format.stdout",
+      "run": "MSG=$(cat); if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

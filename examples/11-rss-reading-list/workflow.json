@@ -1,0 +1,82 @@
+{
+  "name": "rss-reading-list",
+  "description": "Check several RSS/Atom feeds, keep only articles you haven't seen before, and append them to a Markdown reading list.",
+  "args": {
+    "feeds": {
+      "default": "https://hnrss.org/best, https://feeds.bbci.co.uk/news/technology/rss.xml, https://blog.rust-lang.org/feed.xml",
+      "description": "Comma-separated RSS or Atom feed URLs"
+    },
+    "max_items": {
+      "default": "15",
+      "description": "Maximum number of new articles added per run (newest first)"
+    },
+    "output_file": {
+      "default": "~/openclaw-cookbook-output/reading-list.md",
+      "description": "Markdown file the new articles are appended to"
+    },
+    "state_key": {
+      "default": "cookbook-rss-seen",
+      "description": "Where the IDs of already-seen articles are remembered"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for a short summary (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "feeds",
+      "run": "node -e 'const list = process.env.LOBSTER_ARG_FEEDS.split(\",\").map(u => u.trim()).filter(Boolean); console.log(JSON.stringify(list.map(url => ({ url }))))'"
+    },
+    {
+      "id": "fetch",
+      "for_each": "$feeds.json",
+      "item_var": "feed",
+      "steps": [
+        {
+          "id": "items",
+          "env": {
+            "FEED_URL": "$feed.json.url"
+          },
+          "run": "curl -fsSL --max-time 30 -A 'openclaw-cookbook' \"$FEED_URL\" | node -e 'let xml = \"\"; try { xml = require(\"fs\").readFileSync(0, \"utf8\") } catch (e) {} const decode = s => s.replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, \"$1\").replace(/<[^>]+>/g, \"\").replace(/&lt;/g, \"<\").replace(/&gt;/g, \">\").replace(/&quot;/g, String.fromCharCode(34)).replace(/&#39;|&apos;/g, String.fromCharCode(39)).replace(/&#(\\d+);/g, (m, n) => String.fromCharCode(Number(n))).replace(/&amp;/g, \"&\").replace(/\\s+/g, \" \").trim(); const tag = (block, name) => { const m = block.match(new RegExp(\"<\" + name + \"[^>]*>([\\\\s\\\\S]*?)</\" + name + \">\", \"i\")); return m ? decode(m[1]) : \"\" }; const feedTitle = tag(xml.split(/<(item|entry)[\\s>]/i)[0], \"title\") || process.env.FEED_URL; const blocks = xml.match(/<(item|entry)[\\s>][\\s\\S]*?<\\/(item|entry)>/gi) || []; const items = blocks.map(b => { const atomLink = (b.match(/<link[^>]*href=[\"\\x27]([^\"\\x27]+)[\"\\x27]/i) || [])[1]; const link = tag(b, \"link\") || atomLink || \"\"; const date = tag(b, \"pubDate\") || tag(b, \"published\") || tag(b, \"updated\") || tag(b, \"dc:date\"); const ts = Date.parse(date) || 0; return { id: tag(b, \"guid\") || tag(b, \"id\") || link, title: tag(b, \"title\") || \"(untitled)\", link, ts, feed: feedTitle } }).filter(i => i.id); console.log(JSON.stringify({ url: process.env.FEED_URL, ok: blocks.length > 0, count: items.length, items }))'"
+        }
+      ]
+    },
+    {
+      "id": "seen",
+      "pipeline": "state.get ${state_key}"
+    },
+    {
+      "id": "fresh",
+      "env": {
+        "SEEN": "$seen.stdout"
+      },
+      "stdin": "$fetch.json",
+      "run": "node -e 'const results = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")).map(r => r.items); let saved = JSON.parse(process.env.SEEN || \"null\"); if (Array.isArray(saved)) saved = saved[0]; const seen = (saved && saved.ids) || []; const known = new Set(seen); const all = results.flatMap(r => r.items); const failed = results.filter(r => !r.ok).map(r => r.url); const unique = [...new Map(all.map(i => [i.id, i])).values()]; const fresh = unique.filter(i => !known.has(i.id)).sort((a, b) => b.ts - a.ts); const picked = fresh.slice(0, Number(process.env.LOBSTER_ARG_MAX_ITEMS)); const remember = { ids: [...new Set([...unique.map(i => i.id), ...seen])].slice(0, 2000) }; console.log(JSON.stringify({ total: unique.length, newCount: fresh.length, picked, failed, remember }))'"
+    },
+    {
+      "id": "save_seen",
+      "stdin": "$fresh.json.remember",
+      "pipeline": "state.set ${state_key}"
+    },
+    {
+      "id": "append",
+      "env": {
+        "FRESH": "$fresh.stdout"
+      },
+      "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const r = JSON.parse(process.env.FRESH); const file = process.env.LOBSTER_ARG_OUTPUT_FILE.replace(/^~(?=\\/|$)/, require(\"os\").homedir()); if (r.picked.length) { fs.mkdirSync(path.dirname(file), { recursive: true }); const lines = [\"\", \"## \" + new Date().toISOString().slice(0, 10) + \" (\" + r.picked.length + \" new)\", \"\"]; r.picked.forEach(i => lines.push(\"- [ ] [\" + i.title.replace(/[\\[\\]]/g, \"\") + \"](\" + i.link + \") — *\" + i.feed + \"*\")); fs.appendFileSync(file, (fs.existsSync(file) ? \"\" : \"# Reading list\\n\") + lines.join(\"\\n\") + \"\\n\") } const msg = [r.picked.length ? \"📚 \" + r.picked.length + \" new articles added to \" + file + (r.newCount > r.picked.length ? \" (\" + (r.newCount - r.picked.length) + \" more skipped by max_items)\" : \"\") : \"No new articles since last time.\"]; r.picked.slice(0, 5).forEach(i => msg.push(\"• \" + i.title)); r.failed.forEach(u => msg.push(\"⚠️ Could not read \" + u)); console.log(JSON.stringify({ added: r.picked.length, message: msg.join(\"\\n\"), file }))'"
+    },
+    {
+      "id": "notify",
+      "when": "$append.json.added > 0",
+      "env": {
+        "MSG": "$append.json.message"
+      },
+      "run": "if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

@@ -9,6 +9,7 @@
   "name": "my-workflow",
   "description": "一句话说明。",
   "args": { "city": { "default": "Berlin", "description": "..." } },
+  "cost_limit": { "max_usd": 0.05, "action": "stop" },
   "steps": [
     { "id": "fetch", "run": "curl -fsS \"https://api.example.com/?q=$LOBSTER_ARG_CITY\"", "retry": { "max": 3 } },
     { "id": "shape", "stdin": "$fetch.json", "run": "node -e 'const d = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); console.log(JSON.stringify(d.items))'" }
@@ -44,6 +45,7 @@
 | `$step.json` | 解析后的 JSON |
 | `$step.json.a.b.0` | 嵌套字段 / 数组下标 |
 | `$step.approved` | 审批后为 `true`/`false` |
+| `$step.error`、`$step.errorMessage` | 设置了 `on_error: "continue"` 的步骤的失败信息 |
 | `$step.response` | input 步骤收到的答案 |
 | `$item.json` | `for_each` 中的当前元素（或你设置的 `item_var`） |
 | `$LOBSTER_ARG_NAME` | 在 shell 命令中读取参数（安全） |

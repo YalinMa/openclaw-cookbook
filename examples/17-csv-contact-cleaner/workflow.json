@@ -1,0 +1,32 @@
+{
+  "name": "csv-contact-cleaner",
+  "description": "Clean a messy contacts CSV: fix spacing and capitalisation, normalise emails and phone numbers, merge duplicates, and write a clean file plus a file of rejected rows with reasons.",
+  "args": {
+    "input_file": {
+      "default": "examples/17-csv-contact-cleaner/contacts.csv",
+      "description": "CSV file to clean (first row = headers). Needs at least a name and an email column."
+    },
+    "output_dir": {
+      "default": "~/openclaw-cookbook-output/contacts",
+      "description": "Folder for contacts.clean.csv and contacts.rejected.csv"
+    }
+  },
+  "steps": [
+    {
+      "id": "load",
+      "run": "node -e 'const fs = require(\"fs\"); const file = process.env.LOBSTER_ARG_INPUT_FILE.replace(/^~(?=\\/|$)/, require(\"os\").homedir()); const text = fs.readFileSync(file, \"utf8\").replace(/^\\uFEFF/, \"\"); const rows = []; let row = [], field = \"\", quoted = false; for (let i = 0; i < text.length; i++) { const ch = text[i]; if (quoted) { if (ch === \"\\x22\" && text[i + 1] === \"\\x22\") { field += ch; i++ } else if (ch === \"\\x22\") quoted = false; else field += ch } else if (ch === \"\\x22\") quoted = true; else if (ch === \",\") { row.push(field); field = \"\" } else if (ch === \"\\n\" || ch === \"\\r\") { if (ch === \"\\r\" && text[i + 1] === \"\\n\") i++; row.push(field); rows.push(row); row = []; field = \"\" } else field += ch } if (field || row.length) { row.push(field); rows.push(row) } const headers = rows.shift().map(h => h.trim()); const data = rows.map((r, i) => ({ line: i + 2, values: Object.fromEntries(headers.map((h, j) => [h, (r[j] || \"\").trim()])) })).filter(r => Object.values(r.values).some(Boolean)); console.log(JSON.stringify({ file, headers, rows: data }))'"
+    },
+    {
+      "id": "clean",
+      "stdin": "$load.json",
+      "run": "node -e 'const d = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); const find = re => d.headers.find(h => re.test(h.toLowerCase().replace(/[^a-z]/g, \"\"))); const col = { name: find(/^(fullname|name|contact)$/), email: find(/^(email|mail|emailaddress)$/), phone: find(/^(phone|mobile|tel|telephone)$/), company: find(/^(company|organisation|organization|org)$/), city: find(/^(city|town)$/) }; if (!col.name || !col.email) throw new Error(\"Could not find name/email columns in: \" + d.headers.join(\", \")); const nice = s => { s = s.replace(/\\s+/g, \" \").trim(); return s && (s === s.toLowerCase() || s === s.toUpperCase()) ? s.toLowerCase().replace(/(^|[\\s\\-])(\\p{L})/gu, (m, a, b) => a + b.toUpperCase()) : s }; const phone = s => { const t = s.replace(/\\(0\\)/g, \"\"); const digits = t.replace(/\\D/g, \"\"); if (digits.length < 7) return { value: \"\", bad: s.trim() !== \"\" }; return { value: (t.trim().startsWith(\"+\") ? \"+\" : \"\") + digits, bad: false } }; const byEmail = new Map(); const rejected = []; let merged = 0; const fixes = { name: 0, email: 0, phone: 0 }; for (const r of d.rows) { const v = r.values; const rawName = v[col.name] || \"\"; const rawEmail = v[col.email] || \"\"; const name = nice(rawName); const email = rawEmail.toLowerCase().trim(); const ph = phone(col.phone ? v[col.phone] || \"\" : \"\"); const reasons = []; if (!name) reasons.push(\"missing name\"); if (!/^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$/.test(email)) reasons.push(\"invalid email \\u201c\" + rawEmail + \"\\u201d\"); if (reasons.length) { rejected.push({ line: r.line, name: rawName, email: rawEmail, reasons: reasons.join(\"; \") }); continue } if (name !== rawName) fixes.name++; if (email !== rawEmail) fixes.email++; const contact = { name, email, phone: ph.value, company: col.company ? (v[col.company] || \"\").replace(/\\s+/g, \" \") : \"\", city: col.city ? nice(v[col.city] || \"\") : \"\", notes: ph.bad ? \"phone unreadable: \" + v[col.phone] : \"\" }; if (ph.value && ph.value !== (v[col.phone] || \"\")) fixes.phone++; const prev = byEmail.get(email); if (prev) { merged++; for (const k of Object.keys(contact)) if (!prev[k] && contact[k]) prev[k] = contact[k] } else byEmail.set(email, contact) } const clean = [...byEmail.values()].sort((a, b) => a.name.localeCompare(b.name)); console.log(JSON.stringify({ input: d.rows.length, clean, rejected, merged, fixes }))'"
+    },
+    {
+      "id": "write",
+      "env": {
+        "RESULT": "$clean.stdout"
+      },
+      "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const r = JSON.parse(process.env.RESULT); const dir = process.env.LOBSTER_ARG_OUTPUT_DIR.replace(/^~(?=\\/|$)/, require(\"os\").homedir()); fs.mkdirSync(dir, { recursive: true }); const csv = v => /[\",\\n]/.test(String(v)) ? \"\\x22\" + String(v).replace(/\"/g, \"\\x22\\x22\") + \"\\x22\" : String(v); const toCsv = (cols, rows) => [cols.join(\",\"), ...rows.map(x => cols.map(c => csv(x[c] == null ? \"\" : x[c])).join(\",\"))].join(\"\\n\") + \"\\n\"; const cleanFile = path.join(dir, \"contacts.clean.csv\"); const rejFile = path.join(dir, \"contacts.rejected.csv\"); fs.writeFileSync(cleanFile, toCsv([\"name\", \"email\", \"phone\", \"company\", \"city\", \"notes\"], r.clean)); fs.writeFileSync(rejFile, toCsv([\"line\", \"name\", \"email\", \"reasons\"], r.rejected)); const lines = [\"🧹 Cleaned \" + r.input + \" rows → \" + r.clean.length + \" contacts\", \"• merged \" + r.merged + \" duplicate(s) by email\", \"• fixed \" + r.fixes.name + \" names, \" + r.fixes.email + \" emails, \" + r.fixes.phone + \" phone numbers\", \"• rejected \" + r.rejected.length + \" row(s):\"]; r.rejected.forEach(x => lines.push(\"   line \" + x.line + \": \" + x.reasons)); lines.push(\"\", \"Clean file: \" + cleanFile, \"Rejected:   \" + rejFile); console.log(lines.join(\"\\n\"))'"
+    }
+  ]
+}

@@ -1,0 +1,101 @@
+{
+  "name": "blog-to-social-posts",
+  "description": "Turn a blog post into ready-to-publish social posts: an LLM drafts one per platform, you pick and optionally edit one, then approve before it is published to a chat channel and saved.",
+  "args": {
+    "url": {
+      "default": "https://blog.rust-lang.org/2026/08/21/enabling-next-solver-on-nightly/",
+      "description": "The article to promote"
+    },
+    "platforms": {
+      "default": "X (max 250 characters), LinkedIn (professional, 3-5 short paragraphs), Mastodon (friendly, max 450 characters, 2 hashtags)",
+      "description": "Which posts to draft, with style hints"
+    },
+    "drafts_file": {
+      "default": "~/openclaw-cookbook-output/social-posts.md",
+      "description": "Markdown log of approved posts"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel to publish the approved post to (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "article",
+      "run": "curl -fsSL --max-time 30 -A 'openclaw-cookbook' \"$LOBSTER_ARG_URL\" | node -e 'const html = require(\"fs\").readFileSync(0, \"utf8\"); const clean = s => s.replace(/<script[\\s\\S]*?<\\/script>|<style[\\s\\S]*?<\\/style>/gi, \"\").replace(/<[^>]+>/g, \" \").replace(/&nbsp;/g, \" \").replace(/&lt;/g, \"<\").replace(/&gt;/g, \">\").replace(/&quot;/g, String.fromCharCode(34)).replace(/&#39;|&#x27;|&apos;/g, String.fromCharCode(39)).replace(/&#(\\d+);/g, (m, n) => String.fromCharCode(Number(n))).replace(/&amp;/g, \"&\").replace(/\\s+/g, \" \").trim(); const meta = name => (html.match(new RegExp(\"<meta[^>]+(?:property|name)=[\\x22\\x27]\" + name + \"[\\x22\\x27][^>]+content=[\\x22\\x27]([^\\x22\\x27]*)\", \"i\")) || [])[1] || \"\"; const title = clean(meta(\"og:title\") || (html.match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i) || [])[1] || \"\"); const paragraphs = (html.match(/<p[\\s>][\\s\\S]*?<\\/p>/gi) || []).map(clean).filter(p => p.length > 40); const text = paragraphs.join(\"\\n\\n\").slice(0, 6000); if (text.length < 200) { console.error(\"Could not find enough article text on \" + process.env.LOBSTER_ARG_URL); process.exit(1) } console.log(JSON.stringify({ url: process.env.LOBSTER_ARG_URL, title, description: clean(meta(\"og:description\") || meta(\"description\")), text }))'",
+      "retry": {
+        "max": 2,
+        "delay_ms": 2000
+      }
+    },
+    {
+      "id": "write",
+      "stdin": "$article.json",
+      "pipeline": "llm.invoke --prompt 'You are a social media editor. Write one post per platform for this article: ${platforms}. Make each post stand on its own, lead with why the reader should care, stay factual (only use facts from the article), and do NOT include the URL (it is added automatically).' --output-schema '{\"type\":\"object\",\"properties\":{\"posts\":{\"type\":\"array\",\"minItems\":1,\"items\":{\"type\":\"object\",\"properties\":{\"platform\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},\"required\":[\"platform\",\"text\"]}}},\"required\":[\"posts\"]}'"
+    },
+    {
+      "id": "drafts",
+      "env": {
+        "POSTS": "$write.json.output.data.posts",
+        "ARTICLE": "$article.stdout"
+      },
+      "run": "node -e 'const posts = JSON.parse(process.env.POSTS); const a = JSON.parse(process.env.ARTICLE); const lines = [\"Drafts for: \" + a.title]; posts.forEach((p, i) => { lines.push(\"\", \"[\" + (i + 1) + \"] \" + p.platform + \" (\" + (p.text.length + a.url.length + 1) + \" characters with link)\", p.text) }); console.log(JSON.stringify(lines))'"
+    },
+    {
+      "id": "choose",
+      "stdin": "$drafts.json",
+      "input": {
+        "prompt": "Which draft should be published? Give its number, and optionally your edited text to use instead.",
+        "responseSchema": {
+          "type": "object",
+          "properties": {
+            "pick": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of the draft to publish"
+            },
+            "edited_text": {
+              "type": "string",
+              "description": "Optional replacement text (the link is still added)"
+            }
+          },
+          "required": [
+            "pick"
+          ]
+        },
+        "defaults": {
+          "pick": 1
+        }
+      }
+    },
+    {
+      "id": "final",
+      "env": {
+        "POSTS": "$write.json.output.data.posts",
+        "ARTICLE": "$article.stdout",
+        "ANSWER": "$choose.response"
+      },
+      "run": "node -e 'const posts = JSON.parse(process.env.POSTS); const a = JSON.parse(process.env.ARTICLE); const ans = JSON.parse(process.env.ANSWER); const p = posts[ans.pick - 1]; if (!p) { console.error(\"There is no draft number \" + ans.pick + \" (choose 1-\" + posts.length + \")\"); process.exit(1) } const text = ((ans.edited_text || \"\").trim() || p.text.trim()) + \"\\n\\n\" + a.url; console.log(JSON.stringify({ platform: p.platform, edited: Boolean((ans.edited_text || \"\").trim()), text, preview: [\"Platform: \" + p.platform + (ans.edited_text ? \" (your edit)\" : \"\"), \"\"].concat(text.split(\"\\n\")) }))'"
+    },
+    {
+      "id": "approve",
+      "stdin": "$final.json.preview",
+      "approval": {
+        "prompt": "Publish this post?"
+      }
+    },
+    {
+      "id": "publish",
+      "when": "$approve.approved",
+      "env": {
+        "FINAL": "$final.stdout",
+        "TITLE": "$article.json.title"
+      },
+      "run": "MSG=$(node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const f = JSON.parse(process.env.FINAL); const file = process.env.LOBSTER_ARG_DRAFTS_FILE.replace(/^~(?=\\/|$)/, require(\"os\").homedir()); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.appendFileSync(file, (fs.existsSync(file) ? \"\" : \"# Social posts\\n\") + \"\\n## \" + new Date().toISOString().slice(0, 16).replace(\"T\", \" \") + \" · \" + f.platform + \" · \" + process.env.TITLE + \"\\n\\n\" + f.text + \"\\n\"); console.log(f.text)') && if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; echo \"✅ Published to $LOBSTER_ARG_NOTIFY_CHANNEL and saved to $LOBSTER_ARG_DRAFTS_FILE\"; else echo \"✅ Saved to $LOBSTER_ARG_DRAFTS_FILE (no notify_channel set, so nothing was published)\"; fi"
+    }
+  ]
+}

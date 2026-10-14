@@ -9,6 +9,7 @@
   "name": "my-workflow",
   "description": "One sentence.",
   "args": { "city": { "default": "Berlin", "description": "..." } },
+  "cost_limit": { "max_usd": 0.05, "action": "stop" },
   "steps": [
     { "id": "fetch", "run": "curl -fsS \"https://api.example.com/?q=$LOBSTER_ARG_CITY\"", "retry": { "max": 3 } },
     { "id": "shape", "stdin": "$fetch.json", "run": "node -e 'const d = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); console.log(JSON.stringify(d.items))'" }
@@ -44,6 +45,7 @@
 | `$step.json` | Parsed JSON |
 | `$step.json.a.b.0` | Nested value / array index |
 | `$step.approved` | `true`/`false` after an approval |
+| `$step.error`, `$step.errorMessage` | Failure info of a step with `on_error: "continue"` |
 | `$step.response` | The answer of an input step |
 | `$item.json` | Current item inside `for_each` (or your `item_var`) |
 | `$LOBSTER_ARG_NAME` | Arg value inside a shell command (safe) |

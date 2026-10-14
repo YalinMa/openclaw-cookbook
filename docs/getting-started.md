@@ -35,9 +35,9 @@ openclaw --version
 
 | Your version | What works |
 |---|---|
-| **≥ 2026.10.1** (recommended) | Everything: all 10 recipes, inside chat, AI steps through OpenClaw's own model |
-| 2026.5.28 – 2026.9.x | All recipes from the terminal. In chat: everything except recipe 08 (input steps), and AI steps need the LLM bridge (option B below) |
-| < 2026.5.28 | Only recipes 01, 02, 05, 08 and 09 work, even from the terminal: the engine has no loops, parallel steps, sub-workflows or `>` comparisons. Please update. |
+| **≥ 2026.10.1** (recommended) | Everything: all 20 recipes, inside chat, AI steps through OpenClaw's own model |
+| 2026.5.28 – 2026.9.x | All recipes from the terminal. In chat: everything except recipes 08 and 18 (input steps), and AI steps need the LLM bridge (option B below) |
+| < 2026.5.28 | Only recipes 01, 02, 05, 08, 09, 14, 17 and 18 work, even from the terminal: the engine has no loops, parallel steps, sub-workflows or `>` comparisons. Please update. |
 
 Update with:
 
@@ -87,7 +87,7 @@ cd ~/openclaw-cookbook && npm install
 
 ## 4. Connect an LLM (for AI recipes)
 
-Recipes 05, 06, 08 and 10 call an LLM through Lobster's `llm.invoke`. Recipes 01–04, 07 and 09 don't need one. Choose **one** option:
+Recipes 05, 06, 08, 10, 13, 18 and 20 call an LLM through Lobster's `llm.invoke`. The other 13 don't need one. Choose **one** option:
 
 ### Option A: OpenClaw's own model (OpenClaw ≥ 2026.10.1)
 

@@ -1,0 +1,62 @@
+{
+  "name": "git-daily-standup",
+  "description": "Read your recent commits from a local Git repository and let an LLM turn them into a short standup update, with the commit list attached.",
+  "args": {
+    "repo": {
+      "default": ".",
+      "description": "Path to a local Git repository (use an absolute path when running from OpenClaw chat)"
+    },
+    "since": {
+      "default": "1 day ago",
+      "description": "How far back to look, in any format git understands: '1 day ago', 'last monday', '2026-10-01'"
+    },
+    "author": {
+      "default": "",
+      "description": "Only include commits whose author matches this (name or email). Empty = everyone."
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for the standup (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "commits",
+      "run": "node -e 'const { execFileSync } = require(\"child_process\"); const repo = process.env.LOBSTER_ARG_REPO.replace(/^~(?=\\/|$)/, require(\"os\").homedir()); const git = args => execFileSync(\"git\", [\"-C\", repo, ...args], { encoding: \"utf8\", maxBuffer: 20e6, stdio: [\"ignore\", \"pipe\", \"pipe\"] }).trim(); let name; try { name = require(\"path\").basename(git([\"rev-parse\", \"--show-toplevel\"])) } catch (e) { console.error(\"Not a git repository: \" + repo + \" (set the repo arg to your project folder)\"); process.exit(1) } const branch = git([\"rev-parse\", \"--abbrev-ref\", \"HEAD\"]); const args = [\"log\", \"--all\", \"--no-merges\", \"--since=\" + process.env.LOBSTER_ARG_SINCE, \"--date=format:%a %H:%M\", \"--pretty=format:%x1e%h%x1f%an%x1f%ad%x1f%s\", \"--shortstat\"]; if (process.env.LOBSTER_ARG_AUTHOR) args.push(\"--author=\" + process.env.LOBSTER_ARG_AUTHOR); const commits = git(args).split(\"\\x1e\").map(s => s.trim()).filter(Boolean).map(block => { const [head, ...rest] = block.split(\"\\n\"); const stat = rest.join(\" \"); const [hash, author, date, subject] = head.split(\"\\x1f\"); const n = k => Number((stat.match(new RegExp(\"(\\\\d+) \" + k)) || [])[1] || 0); return { hash, author, date, subject, files: n(\"file\"), added: n(\"insertion\"), removed: n(\"deletion\") } }); console.log(JSON.stringify({ repo: name, branch, since: process.env.LOBSTER_ARG_SINCE, count: commits.length, commits }))'"
+    },
+    {
+      "id": "nothing",
+      "when": "$commits.json.count == 0",
+      "env": {
+        "REPO": "$commits.json.repo",
+        "SINCE": "$commits.json.since"
+      },
+      "run": "printf 'No commits in %s since %s. Nothing to report (or a good day for planning).\\n' \"$REPO\" \"$SINCE\""
+    },
+    {
+      "id": "summary",
+      "when": "$commits.json.count > 0",
+      "stdin": "$commits.json",
+      "pipeline": "llm.invoke --prompt 'Write a short standup update (max 100 words) from these git commits. Format: one line \"Done:\" followed by 2-5 bullet points that group related commits into outcomes in plain language (not commit-message jargon), then one line \"Next:\" with a sensible next step inferred from the work. No greetings, no commit hashes.'"
+    },
+    {
+      "id": "standup",
+      "when": "$commits.json.count > 0",
+      "env": {
+        "TEXT": "$summary.json.output.text",
+        "DATA": "$commits.stdout"
+      },
+      "run": "node -e 'const d = JSON.parse(process.env.DATA); const total = d.commits.reduce((s, c) => ({ files: s.files + c.files, added: s.added + c.added, removed: s.removed + c.removed }), { files: 0, added: 0, removed: 0 }); const lines = [\"🧑‍💻 Standup — \" + d.repo + \" (\" + d.branch + \")\", \"\", process.env.TEXT.trim(), \"\", \"Commits since \" + d.since + \": \" + d.count + \" · +\" + total.added + \" / -\" + total.removed + \" lines\"]; d.commits.slice(0, 15).forEach(c => lines.push(\"• \" + c.hash + \" \" + c.subject + \" (\" + c.author + \", \" + c.date + \")\")); if (d.count > 15) lines.push(\"… and \" + (d.count - 15) + \" more\"); console.log(lines.join(\"\\n\"))'"
+    },
+    {
+      "id": "notify",
+      "when": "$commits.json.count > 0",
+      "stdin": "$standup.stdout",
+      "run": "MSG=$(cat); if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

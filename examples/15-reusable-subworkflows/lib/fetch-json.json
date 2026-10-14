@@ -1,0 +1,30 @@
+{
+  "name": "lib-fetch-json",
+  "description": "Reusable building block: GET a URL with retries and a timeout, check that the answer is JSON, and return it.",
+  "args": {
+    "url": {
+      "default": "https://date.nager.at/api/v3/AvailableCountries",
+      "description": "The URL to fetch"
+    },
+    "timeout_seconds": {
+      "default": "20",
+      "description": "Give up on a single attempt after this many seconds"
+    }
+  },
+  "steps": [
+    {
+      "id": "get",
+      "run": "curl -fsSL --max-time \"$LOBSTER_ARG_TIMEOUT_SECONDS\" -H 'Accept: application/json' -A 'openclaw-cookbook' \"$LOBSTER_ARG_URL\"",
+      "retry": {
+        "max": 3,
+        "backoff": "exponential",
+        "delay_ms": 1500
+      }
+    },
+    {
+      "id": "check",
+      "stdin": "$get.stdout",
+      "run": "node -e 'const text = require(\"fs\").readFileSync(0, \"utf8\"); try { console.log(JSON.stringify(JSON.parse(text))) } catch (e) { console.error(\"Not JSON from \" + process.env.LOBSTER_ARG_URL + \": \" + text.slice(0, 120)); process.exit(1) }'"
+    }
+  ]
+}

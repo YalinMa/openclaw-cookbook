@@ -2,7 +2,7 @@
   "name": "openclaw-cookbook",
   "version": "1.0.0",
   "private": true,
-  "description": "10 practical, tested OpenClaw (Lobster) workflow recipes for beginners",
+  "description": "20 practical, tested OpenClaw (Lobster) workflow recipes for beginners",
   "license": "MIT",
   "type": "module",
   "engines": {

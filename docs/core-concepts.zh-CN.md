@@ -41,12 +41,12 @@ OpenClaw 的 Agent 是一个 LLM：灵活、有创造力，但每次做法可能
 | 类型 | 作用 | 食谱 |
 |---|---|---|
 | `run` | 执行一条 shell 命令（`/bin/sh`），打印的内容就是这一步的输出 | 全部 |
-| `pipeline` | 执行 Lobster 内置命令：`llm.invoke`、`diff.last`、`state.get`、`state.set`…… | 03、04、05 |
-| `approval` | 暂停，等待"是/否"决定 | 06、07 |
-| `input` | 暂停并提问，答案必须符合指定的 JSON Schema | 08 |
-| `for_each` | 对数组中的每一项执行一遍子步骤 | 03、04、06 |
+| `pipeline` | 执行 Lobster 内置命令：`llm.invoke`、`diff.last`、`state.get`、`state.set`…… | 03、04、05、11、12、20 |
+| `approval` | 暂停，等待"是/否"决定 | 06、07、18 |
+| `input` | 暂停并提问，答案必须符合指定的 JSON Schema | 08、18 |
+| `for_each` | 对数组中的每一项执行一遍子步骤 | 03、04、06、11、12、19 |
 | `parallel` | 同时执行多个分支 | 10 |
-| `workflow` | 把另一个工作流文件当作一个步骤来运行 | 10 |
+| `workflow` | 把另一个工作流文件当作一个步骤来运行 | 10、15 |
 
 ## 4. 在步骤之间传递数据
 
@@ -56,6 +56,7 @@ OpenClaw 的 Agent 是一个 LLM：灵活、有创造力，但每次做法可能
 - `$id.json`：同样的内容按 JSON 解析后的结果（如果是合法 JSON）
 - `$id.json.some.field`：深入 JSON 内部，支持数组下标（`$id.json.items.0.name`）
 - `$id.approved`（审批步骤）、`$id.response`（input 步骤）、`$id.skipped`
+- `$id.error` 和 `$id.errorMessage`（设置了 `on_error: "continue"` 且失败的步骤）
 
 把数据交给某个步骤，有两种**安全**的方式：
 
@@ -132,6 +133,7 @@ OpenClaw 的 Agent 是一个 LLM：灵活、有创造力，但每次做法可能
 - 输入（`stdin`）会和提示词一起发送。
 - 使用 `--output-schema` 时，答案会被校验，不符合就重试一次，结果在 `$pick.json.output.data`。不带 schema 时，文本在 `$pick.json.output.text`。
 - 答案按"提示词 + 输入"缓存，重复运行和恢复运行都不会重复付费。
+- 用 `"cost_limit": { "max_usd": 0.05, "action": "stop" }` 给整个工作流设置预算（Lobster 不认识的模型需要设置 `LOBSTER_LLM_PRICING_JSON`）。把多条数据合并成一次调用，并把答案保存为规则，避免重复询问（[食谱 20](../examples/20-expense-categorizer/README.zh-CN.md)）。
 - 请求发往哪里取决于 `LOBSTER_LLM_PROVIDER`（`openclaw` 或 `http`），见[快速上手第 4 节](getting-started.zh-CN.md#4-接入-llmai-类食谱需要)。
 - 贯穿全书的模式：**LLM 做判断，代码做排版。** 让模型去分类、挑选、撰写，而事实信息（链接、数字）由普通步骤从原始数据中补上。
 
@@ -141,8 +143,11 @@ OpenClaw 的 Agent 是一个 LLM：灵活、有创造力，但每次做法可能
 |---|---|
 | 重试 | `"retry": { "max": 3, "backoff": "exponential", "delay_ms": 2000 }`（[02](../examples/02-daily-weather-briefing/README.zh-CN.md)） |
 | 超时 | 每步 `"timeout_ms": 60000`；整个运行的超时在工具调用里用 `timeoutMs` 设置 |
-| 出错后继续 | `"on_error": "continue"`（该步骤会带上 `error: true`）或 `"skip_rest"` |
+| 出错后继续 | `"on_error": "continue"`（该步骤会带上 `error: true` 和 `errorMessage`），再用 `when` 分支（[16](../examples/16-resilient-api-fallback/README.zh-CN.md)）。`"skip_rest"` 会静默结束运行。 |
 | 把错误当作数据 | 在步骤内部捕获失败，输出 `{"error": "..."}`（[03](../examples/03-website-uptime-monitor/README.zh-CN.md)、[04](../examples/04-github-release-watcher/README.zh-CN.md)） |
 | 可撤销的操作 | 移动而不是删除，并生成撤销脚本（[07](../examples/07-safe-file-cleanup/README.zh-CN.md)） |
-| 校验输入 | 把外部数据视为不可信（[09](../examples/09-webhook-lead-capture/README.zh-CN.md)） |
+| 校验输入 | 把外部数据视为不可信（[09](../examples/09-webhook-lead-capture/README.zh-CN.md)、[17](../examples/17-csv-contact-cleaner/README.zh-CN.md)） |
+| 备用方案 | 主数据源失败时使用备用来源（[16](../examples/16-resilient-api-fallback/README.zh-CN.md)） |
+| 限速 | 循环上使用 `batch_size` + `pause_ms`，遇到 HTTP 429 等待后重试（[19](../examples/19-batch-geocoder/README.zh-CN.md)） |
+| 复用 | 把公共逻辑放进子工作流（[15](../examples/15-reusable-subworkflows/README.zh-CN.md)） |
 | 运行前检查 | `npx lobster run --dry-run --file …` 和 `npx lobster graph --file …` |

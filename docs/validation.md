@@ -15,6 +15,7 @@ Every recipe is checked at three levels. All results below are from **14 October
 [`scripts/validate.mjs`](../scripts/validate.mjs) (no dependencies) checks every `examples/*/workflow.json`:
 
 - valid JSON, only known fields, a `name` and a meaningful `description`
+- every workflow file is checked, including reusable sub-workflows such as `lib/*.json`
 - every step has a unique id and exactly one kind (`run`, `pipeline`, `approval`, …)
 - every `$step` reference points to an **earlier** step (or the loop variable)
 - every `${arg}` and `$LOBSTER_ARG_X` matches a declared arg, and every arg has a default and a description
@@ -34,7 +35,7 @@ Every recipe is checked at three levels. All results below are from **14 October
 - `openclaw message send` is replaced by a stub ([`scripts/test-bin/openclaw`](../scripts/test-bin/openclaw)) that records the call.
 - Approvals and input steps are resumed (approve, reject, answer).
 - State, cache and output files go to a temporary folder.
-- Recipes 02, 03, 04, 05 and 10 call the real public APIs.
+- Recipes 02–05, 10–12, 15, 16, 18 and 19 call the real public APIs. Recipe 13 creates a throwaway Git repository.
 
 | Recipe | Test cases |
 |---|---|
@@ -48,22 +49,34 @@ Every recipe is checked at three levels. All results below are from **14 October
 | 08 | pauses for input → answer `keep: "1"` writes a 1-item checklist with the note |
 | 09 | new lead saved + notified · duplicate ignored · quotes/commas/newlines CSV-escaped · invalid lead rejected |
 | 10 | parallel sources + sub-workflow + LLM, links appended |
+| 11 | RSS + Atom articles appended to Markdown · 2nd run adds nothing · a broken feed is reported |
+| 12 | 1st run alerts on true rules (and sends) · 2nd run quiet · cleared rules, unknown pairs and invalid rules reported |
+| 13 | commits from a temp repo summarised, with totals · author filter · empty window · clear "not a git repository" error |
+| 14 | crossing limits alerts once · repeat run quiet · recovery reported |
+| 15 | reminder built from `lib/fetch-json` + `lib/notify` (and sent) · `lib/notify` on its own |
+| 16 | primary API · fallback when primary is down · both down → clear failure · sanity check blocks bad data |
+| 17 | 10 messy rows → 6 contacts, 2 merged, 2 rejected with line numbers; quotes and commas escaped |
+| 18 | input (pick + edit) → approval shows the exact text → published + logged · reject publishes nothing |
+| 19 | geocodes with pauses, country hints work, "not found" reported, CSV correct |
+| 20 | report totals exact · 2nd run uses saved rules · `cost_limit` stops an over-budget run |
 
-**Result: 20 / 20 passed** with each Lobster engine version bundled in OpenClaw plugins since May 2026:
+**Result: 40 / 40 passed** with each Lobster engine version bundled in OpenClaw plugins since May 2026:
 
 | Lobster engine | Bundled in plugin | Result |
 |---|---|---|
-| 2026.9.16 (latest standalone) | — | 20/20 |
-| 2026.9.14 | `@openclaw/lobster` 2026.10.x | 20/20 |
-| 2026.6.11 | 2026.7.x – 2026.9.1 | 20/20 |
-| 2026.5.22 | 2026.5.28 – 2026.6.x | 20/20 |
-| 2026.4.6 | ≤ 2026.5.12 | 9/20: no `for_each`, `parallel`, `workflow:` or `>` comparisons |
+| 2026.9.16 (latest standalone) | — | 40/40 |
+| 2026.9.14 | `@openclaw/lobster` 2026.10.x | 40/40 |
+| 2026.6.11 | 2026.7.x – 2026.9.1 | 40/40 |
+| 2026.5.22 | 2026.5.28 – 2026.6.x | 40/40 |
+| 2026.4.6 | ≤ 2026.5.12 | 15/40: no `for_each`, `parallel`, `workflow:` or `>` comparisons |
 
 Engines 2026.9.8 and 2026.9.13 (plugins 2026.9.5–2026.9.9) weren't tested separately. Run against a specific engine with `LOBSTER_BIN=/path/to/lobster npm test`.
 
-**Real-LLM run:** recipes 05, 06, 08 and 10 were also run with DeepSeek (`deepseek-flash`) through the bridge. The example outputs in the recipe READMEs come from these runs.
+**Real-LLM run:** recipes 05, 06, 08, 10, 13, 18 and 20 were also run with DeepSeek (`deepseek-flash`) through the bridge. The example outputs in the recipe READMEs come from these runs.
 
 ## 3. Inside OpenClaw
+
+These in-OpenClaw tests were done for recipes 01–10. Recipes 11–20 use the same building blocks (loops, state, approvals, input, sub-workflows, `llm.invoke`) and were verified on the same Lobster engines in level 2.
 
 To avoid touching a real setup, these tests used isolated OpenClaw profiles (`openclaw --profile …`, own config folder and port) with DeepSeek as the agent model.
 
@@ -93,6 +106,9 @@ Running everything for real surfaced issues that reading the docs would not have
 9. **`diff.last` stores a one-item list as a bare value**, so the comparison crashed the second time. → Recipe 03 diffs an object (`{down: [...]}`).
 10. **Splicing step output into shell commands broke on quotes.** → All recipes use `stdin`/`env`, and the validator enforces it.
 11. **Large API responses passed through `env`** (Wikipedia ≈ 300 KB) risk the OS environment size limit. → Recipe 10 trims data inside each branch.
+12. **`on_error: "skip_rest"` ends the run silently**, so the user can't tell why nothing happened. → Recipe 16 uses `continue` + `when` and shows `$step.errorMessage`.
+13. **Change detection re-alerted on every small change** when the alert key contained a number ("memory 62.3%"). → Recipe 14 uses stable keys (`memory`, `disk /`).
+14. **The `lobster` tool's default 20 s timeout** is too short for rate-limited jobs (recipe 19 takes ~30 s). → Its README says to pass `timeoutMs`.
 
 ## What is *not* covered
 

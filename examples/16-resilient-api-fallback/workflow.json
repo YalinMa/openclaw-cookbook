@@ -1,0 +1,98 @@
+{
+  "name": "resilient-api-fallback",
+  "description": "Get exchange rates from a primary API with retries and a timeout; if it still fails, use a backup API; sanity-check the data before reporting it.",
+  "args": {
+    "base": {
+      "default": "USD",
+      "description": "Base currency"
+    },
+    "symbols": {
+      "default": "EUR,CNY,JPY,GBP",
+      "description": "Comma-separated currencies to report"
+    },
+    "primary_url": {
+      "default": "https://open.er-api.com/v6/latest/",
+      "description": "Primary API (the base currency is appended). Set it to a broken URL to watch the fallback work."
+    },
+    "fallback_url": {
+      "default": "https://api.frankfurter.dev/v1/latest?base=",
+      "description": "Backup API (the base currency is appended)"
+    },
+    "max_age_days": {
+      "default": "4",
+      "description": "Reject data older than this many days (markets close on weekends)"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for the report (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "primary",
+      "run": "curl -fsSL --max-time 10 \"$LOBSTER_ARG_PRIMARY_URL$LOBSTER_ARG_BASE\" | node -e 'const text = require(\"fs\").readFileSync(0, \"utf8\"); if (!text.trim()) { console.error(\"no response (network or HTTP error)\"); process.exit(1) } let d; try { d = JSON.parse(text) } catch (e) { console.error(\"response is not JSON\"); process.exit(1) } if (d.result !== \"success\") { console.error(\"primary API said: \" + (d[\"error-type\"] || d.result)); process.exit(1) } console.log(JSON.stringify({ source: \"open.er-api.com\", base: d.base_code, date: new Date(d.time_last_update_unix * 1000).toISOString().slice(0, 10), rates: d.rates }))'",
+      "retry": {
+        "max": 3,
+        "backoff": "exponential",
+        "delay_ms": 1000,
+        "jitter": true
+      },
+      "timeout_ms": 30000,
+      "on_error": "continue"
+    },
+    {
+      "id": "fallback",
+      "when": "$primary.error == true",
+      "run": "curl -fsSL --max-time 10 \"$LOBSTER_ARG_FALLBACK_URL$LOBSTER_ARG_BASE\" | node -e 'const text = require(\"fs\").readFileSync(0, \"utf8\"); if (!text.trim()) { console.error(\"no response (network or HTTP error)\"); process.exit(1) } let d; try { d = JSON.parse(text) } catch (e) { console.error(\"response is not JSON\"); process.exit(1) } console.log(JSON.stringify({ source: \"frankfurter.dev\", base: d.base, date: d.date, rates: d.rates }))'",
+      "retry": {
+        "max": 2,
+        "delay_ms": 1000
+      },
+      "timeout_ms": 30000,
+      "on_error": "continue"
+    },
+    {
+      "id": "pick",
+      "env": {
+        "PRIMARY": "$primary.stdout",
+        "FALLBACK": "$fallback.stdout",
+        "PRIMARY_ERROR": "$primary.errorMessage",
+        "FALLBACK_ERROR": "$fallback.errorMessage"
+      },
+      "run": "node -e 'const parse = s => { try { return JSON.parse(s) } catch (e) { return null } }; const why = s => String(s || \"\").trim().split(\"\\n\").pop().replace(/^workflow command failed \\(\\d+\\): /, \"\"); const p = parse(process.env.PRIMARY); const f = parse(process.env.FALLBACK); const data = p || f; if (!data) { console.error(\"Both APIs failed. Primary: \" + why(process.env.PRIMARY_ERROR) + \". Backup: \" + why(process.env.FALLBACK_ERROR)); process.exit(1) } console.log(JSON.stringify(Object.assign({}, data, { usedFallback: !p, primaryError: p ? null : why(process.env.PRIMARY_ERROR) })))'"
+    },
+    {
+      "id": "sanity",
+      "stdin": "$pick.json",
+      "run": "node -e 'const d = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); const wanted = process.env.LOBSTER_ARG_SYMBOLS.split(\",\").map(s => s.trim().toUpperCase()).filter(Boolean); const problems = []; const missing = wanted.filter(s => !(d.rates[s] > 0)); if (missing.length) problems.push(\"missing or invalid rates for \" + missing.join(\", \")); const age = Math.floor((Date.now() - Date.parse(d.date)) / 86400000); if (!(age <= Number(process.env.LOBSTER_ARG_MAX_AGE_DAYS))) problems.push(\"data is \" + age + \" days old\"); if (d.base !== process.env.LOBSTER_ARG_BASE.toUpperCase()) problems.push(\"base is \" + d.base); if (problems.length) { console.error(problems.join(\"; \")); process.exit(1) } console.log(JSON.stringify({ wanted, age }))'",
+      "on_error": "continue"
+    },
+    {
+      "id": "rejected",
+      "when": "$sanity.error == true",
+      "env": {
+        "WHY": "$sanity.errorMessage"
+      },
+      "run": "node -e 'const why = process.env.WHY.trim().split(\"\\n\").pop().replace(/^workflow command failed \\(\\d+\\): /, \"\"); console.log(\"⚠️ Exchange-rate data failed the sanity check, nothing was sent: \" + why)'"
+    },
+    {
+      "id": "report",
+      "when": "$sanity.error != true",
+      "env": {
+        "DATA": "$pick.stdout",
+        "WANTED": "$sanity.json.wanted"
+      },
+      "run": "node -e 'const d = JSON.parse(process.env.DATA); const wanted = JSON.parse(process.env.WANTED); const lines = [\"💱 1 \" + d.base + \" = \" + wanted.map(s => d.rates[s].toLocaleString(\"en-US\", { maximumFractionDigits: 4 }) + \" \" + s).join(\" · \"), \"Source: \" + d.source + \", \" + d.date + (d.usedFallback ? \" (backup API used, primary failed: \" + d.primaryError + \")\" : \"\")]; console.log(lines.join(\"\\n\"))'"
+    },
+    {
+      "id": "notify",
+      "when": "$sanity.error != true",
+      "stdin": "$report.stdout",
+      "run": "MSG=$(cat); if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

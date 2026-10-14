@@ -1,0 +1,13 @@
+# One place per line. Lines starting with # are ignored.
+Berlin
+Shanghai
+São Paulo
+Nairobi
+Reykjavík
+Hangzhou, CN
+Springfield, US
+Cape Town
+Kyoto
+Xyzzy Nowhereville
+Vancouver, CA
+Ushuaia
