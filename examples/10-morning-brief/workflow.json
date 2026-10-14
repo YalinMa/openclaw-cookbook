@@ -1,0 +1,92 @@
+{
+  "name": "morning-brief",
+  "description": "Build a personal morning brief: weather (reusing recipe 02 as a sub-workflow), top tech news, exchange rates and 'on this day' fetched in parallel, then written up by an LLM.",
+  "args": {
+    "city": {
+      "default": "Berlin",
+      "description": "City name for the weather"
+    },
+    "latitude": {
+      "default": "52.52",
+      "description": "Latitude of the city"
+    },
+    "longitude": {
+      "default": "13.41",
+      "description": "Longitude of the city"
+    },
+    "base_currency": {
+      "default": "USD",
+      "description": "Currency to quote exchange rates from"
+    },
+    "currencies": {
+      "default": "EUR,CNY,JPY,GBP",
+      "description": "Comma-separated currencies to show"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for the brief (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "weather",
+      "workflow": "../02-daily-weather-briefing/workflow.json",
+      "workflow_args": {
+        "city": "${city}",
+        "latitude": "${latitude}",
+        "longitude": "${longitude}"
+      }
+    },
+    {
+      "id": "sources",
+      "parallel": {
+        "wait": "all",
+        "timeout_ms": 45000,
+        "branches": [
+          {
+            "id": "news",
+            "run": "curl -fsS --max-time 20 'https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=6' | node -e 'const d = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); console.log(JSON.stringify(d.hits.map(h => ({ title: h.title, url: h.url || \"https://news.ycombinator.com/item?id=\" + h.objectID, points: h.points }))))' || echo '[]'"
+          },
+          {
+            "id": "rates",
+            "run": "curl -fsS --max-time 20 \"https://open.er-api.com/v6/latest/$LOBSTER_ARG_BASE_CURRENCY\" | node -e 'const d = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); const out = {}; process.env.LOBSTER_ARG_CURRENCIES.split(\",\").map(c => c.trim().toUpperCase()).forEach(c => { if (d.rates[c]) out[c] = d.rates[c] }); console.log(JSON.stringify({ base: d.base_code, rates: out }))' || echo '{}'"
+          },
+          {
+            "id": "history",
+            "run": "curl -fsS --max-time 20 -H 'User-Agent: openclaw-cookbook (https://github.com/YalinMa/openclaw-cookbook)' \"https://en.wikipedia.org/api/rest_v1/feed/onthisday/selected/$(date +%m/%d)\" | node -e 'const d = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); console.log(JSON.stringify(d.selected.slice(0, 3).map(e => ({ year: e.year, text: e.text }))))' || echo '[]'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "facts",
+      "env": {
+        "WEATHER": "$weather.stdout",
+        "SOURCES": "$sources.json"
+      },
+      "run": "node -e 'const s = JSON.parse(process.env.SOURCES); console.log(JSON.stringify({ date: new Date().toDateString(), weather: process.env.WEATHER.trim(), news: s.news || [], rates: s.rates || {}, onThisDay: s.history || [] }))'"
+    },
+    {
+      "id": "write",
+      "stdin": "$facts.json",
+      "pipeline": "llm.invoke --prompt 'Write a warm, upbeat morning brief for me from the facts below, under 160 words, in plain text with a few emoji. Sections: weather (with advice), 3 most interesting tech headlines (titles only, no URLs), exchange rates in one line, and one fun fact from on-this-day. Use only the facts given; skip any section whose data is missing.'"
+    },
+    {
+      "id": "brief",
+      "env": {
+        "TEXT": "$write.json.output.text",
+        "FACTS": "$facts.stdout"
+      },
+      "run": "node -e 'const f = JSON.parse(process.env.FACTS); const links = f.news.slice(0, 3).map((n, i) => (i + 1) + \". \" + n.title + \"\\n   \" + n.url); console.log(process.env.TEXT.trim() + (links.length ? \"\\n\\n🔗 Links\\n\" + links.join(\"\\n\") : \"\"))'"
+    },
+    {
+      "id": "notify",
+      "stdin": "$brief.stdout",
+      "run": "MSG=$(cat); if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

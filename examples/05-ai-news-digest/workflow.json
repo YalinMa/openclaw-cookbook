@@ -1,0 +1,56 @@
+{
+  "name": "ai-news-digest",
+  "description": "Fetch today's Hacker News front page, let an LLM pick and explain the most interesting stories, and build a digest with real links.",
+  "args": {
+    "count": {
+      "default": "15",
+      "description": "How many front-page stories to give the LLM"
+    },
+    "interests": {
+      "default": "AI, developer tools, open source",
+      "description": "What you care about; the LLM ranks stories by this"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for the digest (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "fetch",
+      "run": "curl -fsS --max-time 20 \"https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=$LOBSTER_ARG_COUNT\"",
+      "retry": {
+        "max": 3,
+        "backoff": "exponential",
+        "delay_ms": 2000
+      }
+    },
+    {
+      "id": "stories",
+      "stdin": "$fetch.json",
+      "run": "node -e 'const data = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); const stories = data.hits.map((h, i) => ({ index: i + 1, title: h.title, url: h.url || \"https://news.ycombinator.com/item?id=\" + h.objectID, points: h.points, comments: h.num_comments, discussion: \"https://news.ycombinator.com/item?id=\" + h.objectID })); console.log(JSON.stringify(stories))'"
+    },
+    {
+      "id": "pick",
+      "stdin": "$stories.json",
+      "pipeline": "llm.invoke --prompt 'You are a tech news editor. The input is a numbered list of Hacker News front-page stories. The reader is interested in: ${interests}. Pick the 3 to 5 stories they would find most worth reading, best first. For each, give its index and one sentence on why it matters. Also write a one-sentence overview of the day. Only use indexes from the input.' --output-schema '{\"type\":\"object\",\"properties\":{\"overview\":{\"type\":\"string\"},\"picks\":{\"type\":\"array\",\"minItems\":3,\"maxItems\":5,\"items\":{\"type\":\"object\",\"properties\":{\"index\":{\"type\":\"integer\",\"minimum\":1},\"why\":{\"type\":\"string\"}},\"required\":[\"index\",\"why\"]}}},\"required\":[\"overview\",\"picks\"]}'"
+    },
+    {
+      "id": "digest",
+      "env": {
+        "STORIES": "$stories.stdout",
+        "PICKS": "$pick.json.output.data"
+      },
+      "run": "node -e 'const stories = JSON.parse(process.env.STORIES); const ai = JSON.parse(process.env.PICKS); const lines = [\"📰 Your Hacker News digest — \" + new Date().toISOString().slice(0, 10), \"\", ai.overview, \"\"]; let n = 0; const used = new Set(); for (const p of ai.picks) { const s = stories.find(x => x.index === p.index); if (!s || used.has(p.index)) continue; used.add(p.index); n += 1; lines.push(n + \". \" + s.title + \" (\" + s.points + \" points, \" + s.comments + \" comments)\"); lines.push(\"   \" + p.why); lines.push(\"   \" + s.url); } console.log(lines.join(\"\\n\"))'"
+    },
+    {
+      "id": "notify",
+      "stdin": "$digest.stdout",
+      "run": "MSG=$(cat); if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

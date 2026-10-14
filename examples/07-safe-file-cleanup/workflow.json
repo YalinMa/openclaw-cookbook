@@ -1,0 +1,50 @@
+{
+  "name": "safe-file-cleanup",
+  "description": "Find old files in a folder, show what would be cleaned up, and only after approval move them to an archive folder (never delete). Writes an undo script.",
+  "args": {
+    "folder": {
+      "default": "~/Downloads",
+      "description": "Folder to clean up (only its top level, subfolders are left alone)"
+    },
+    "older_than_days": {
+      "default": "30",
+      "description": "Only files not modified for this many days"
+    },
+    "archive": {
+      "default": "~/openclaw-cookbook-output/archive",
+      "description": "Where old files are moved. A dated subfolder is created for each run."
+    }
+  },
+  "steps": [
+    {
+      "id": "scan",
+      "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const home = require(\"os\").homedir(); const dir = process.env.LOBSTER_ARG_FOLDER.replace(/^~(?=\\/|$)/, home); const days = Number(process.env.LOBSTER_ARG_OLDER_THAN_DAYS); const cutoff = Date.now() - days * 86400000; const files = fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isFile() && !e.name.startsWith(\".\")).map(e => { const st = fs.statSync(path.join(dir, e.name)); return { name: e.name, mb: Math.round(st.size / 10485.76) / 100, ageDays: Math.floor((Date.now() - st.mtimeMs) / 86400000), mtime: st.mtimeMs } }).filter(f => f.mtime < cutoff).sort((a, b) => b.mb - a.mb).map(({ mtime, ...f }) => f); const totalMb = Math.round(files.reduce((s, f) => s + f.mb, 0) * 100) / 100; console.log(JSON.stringify({ folder: dir, count: files.length, totalMb, files }))'"
+    },
+    {
+      "id": "preview",
+      "stdin": "$scan.json",
+      "run": "node -e 'const s = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); const lines = [s.count + \" files in \" + s.folder + \" are older than \" + process.env.LOBSTER_ARG_OLDER_THAN_DAYS + \" days (\" + s.totalMb + \" MB):\"]; s.files.slice(0, 30).forEach(f => lines.push(\"• \" + f.name + \"  \" + (f.mb || \"<0.01\") + \" MB, \" + f.ageDays + \" days old\")); if (s.count > 30) lines.push(\"… and \" + (s.count - 30) + \" more\"); lines.push(\"They will be MOVED (not deleted) to an archive folder.\"); console.log(JSON.stringify(lines))'"
+    },
+    {
+      "id": "nothing",
+      "when": "$scan.json.count == 0",
+      "run": "echo 'Nothing to clean up: no files are older than the limit.'"
+    },
+    {
+      "id": "approve",
+      "when": "$scan.json.count > 0",
+      "stdin": "$preview.json",
+      "approval": {
+        "prompt": "Move these old files to the archive folder?"
+      }
+    },
+    {
+      "id": "move",
+      "when": "$approve.approved",
+      "env": {
+        "SCAN": "$scan.stdout"
+      },
+      "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const home = require(\"os\").homedir(); const s = JSON.parse(process.env.SCAN); const stamp = new Date().toISOString().slice(0, 19).replace(/:/g, \"-\"); const dest = path.join(process.env.LOBSTER_ARG_ARCHIVE.replace(/^~(?=\\/|$)/, home), stamp); fs.mkdirSync(dest, { recursive: true }); const q = p => \"\\x27\" + p.replace(/\\x27/g, \"\\x27\\\\\\x27\\x27\") + \"\\x27\"; const undo = [\"#!/bin/sh\", \"# Moves the archived files back to where they came from.\"]; let moved = 0; for (const f of s.files) { const from = path.join(s.folder, f.name); const to = path.join(dest, f.name); if (!fs.existsSync(from)) continue; try { fs.renameSync(from, to) } catch (e) { if (e.code !== \"EXDEV\") throw e; fs.copyFileSync(from, to); fs.unlinkSync(from) } undo.push(\"mv -n \" + q(to) + \" \" + q(from)); moved += 1 } fs.writeFileSync(path.join(dest, \"undo.sh\"), undo.join(\"\\n\") + \"\\n\", { mode: 0o755 }); console.log(\"📦 Moved \" + moved + \" files (\" + s.totalMb + \" MB) to \" + dest + \"\\nChanged your mind? Run: sh \" + q(path.join(dest, \"undo.sh\")))'"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Test stand-in for the `openclaw` CLI: records the call instead of sending anything.
+# The test runner puts this directory first on PATH.
+LOG="${OPENCLAW_STUB_LOG:-/dev/stderr}"
+{
+  printf 'openclaw'
+  for a in "$@"; do printf ' [%s]' "$a"; done
+  printf '\n'
+} >> "$LOG"
+echo '{"ok":true,"stub":true}'

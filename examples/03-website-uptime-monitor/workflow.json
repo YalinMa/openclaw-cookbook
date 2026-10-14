@@ -1,0 +1,77 @@
+{
+  "name": "website-uptime-monitor",
+  "description": "Check a list of websites, remember which ones were down last time, and only alert when something goes down or comes back up.",
+  "args": {
+    "urls": {
+      "default": "https://example.com, https://www.wikipedia.org, https://this-site-does-not-exist.invalid",
+      "description": "Comma-separated list of URLs to check"
+    },
+    "timeout_ms": {
+      "default": "10000",
+      "description": "How long to wait for each site before calling it down"
+    },
+    "state_key": {
+      "default": "cookbook-uptime-monitor",
+      "description": "Name of the saved snapshot. Use a different key per monitor."
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for alerts (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "targets",
+      "run": "node -e 'const urls = process.env.LOBSTER_ARG_URLS.split(\",\").map(u => u.trim()).filter(Boolean); console.log(JSON.stringify(urls.map(url => ({ url }))))'"
+    },
+    {
+      "id": "check",
+      "for_each": "$targets.json",
+      "item_var": "site",
+      "steps": [
+        {
+          "id": "probe",
+          "env": {
+            "URL": "$site.json.url"
+          },
+          "run": "node -e 'const url = process.env.URL; const started = Date.now(); fetch(url, { redirect: \"follow\", signal: AbortSignal.timeout(Number(process.env.LOBSTER_ARG_TIMEOUT_MS)) }).then(r => ({ url, up: r.status < 400, status: r.status }), e => ({ url, up: false, status: 0, error: String((e.cause && e.cause.code) || e.name) })).then(result => { result.ms = Date.now() - started; console.log(JSON.stringify(result)) })'"
+        }
+      ]
+    },
+    {
+      "id": "summary",
+      "stdin": "$check.json",
+      "run": "node -e 'const rows = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")).map(r => r.probe); const down = rows.filter(r => !r.up); console.log(JSON.stringify({ checked: rows.length, up: rows.length - down.length, down: down.map(r => r.url).sort(), details: rows }))'"
+    },
+    {
+      "id": "snapshot",
+      "stdin": "$summary.json",
+      "run": "node -e 'const s = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); console.log(JSON.stringify({ down: s.down }))'"
+    },
+    {
+      "id": "changes",
+      "stdin": "$snapshot.json",
+      "pipeline": "diff.last --key ${state_key}"
+    },
+    {
+      "id": "report",
+      "env": {
+        "SUMMARY": "$summary.stdout",
+        "DIFF": "$changes.stdout"
+      },
+      "run": "node -e 'const s = JSON.parse(process.env.SUMMARY); const raw = JSON.parse(process.env.DIFF); const d = Array.isArray(raw) ? raw[0] : raw; const before = (d.before && d.before.down) || []; const after = (d.after && d.after.down) || []; const newlyDown = after.filter(u => !before.includes(u)); const recovered = before.filter(u => !after.includes(u)); const why = u => { const r = s.details.find(x => x.url === u); return r.status ? \"HTTP \" + r.status : r.error }; const lines = []; newlyDown.forEach(u => lines.push(\"🔴 DOWN: \" + u + \" (\" + why(u) + \")\")); recovered.forEach(u => lines.push(\"✅ RECOVERED: \" + u)); const alert = lines.length > 0; lines.push(\"Checked \" + s.checked + \" sites: \" + s.up + \" up, \" + s.down.length + \" down.\"); console.log(JSON.stringify({ alert, message: lines.join(\"\\n\"), newlyDown, recovered, details: s.details }))'"
+    },
+    {
+      "id": "notify",
+      "when": "$report.json.alert == true",
+      "env": {
+        "MSG": "$report.json.message"
+      },
+      "run": "if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

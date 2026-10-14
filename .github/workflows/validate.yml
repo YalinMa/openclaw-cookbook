@@ -1,0 +1,22 @@
+name: Validate workflows
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Lobster CLI
+        run: npm ci
+      - name: Static checks (+ lobster --dry-run)
+        run: npm run validate
+      - name: End-to-end recipe tests (mock LLM, live public APIs)
+        run: npm test
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

@@ -1,0 +1,60 @@
+{
+  "name": "webhook-lead-capture",
+  "description": "Receive a website lead (e.g. from an OpenClaw webhook), validate and clean it, skip duplicates, append it to a CSV file, and notify the team.",
+  "args": {
+    "payload": {
+      "default": "{\"name\": \"  Ada Lovelace \", \"email\": \"ADA@Example.com\", \"company\": \"Analytical Engines Ltd\", \"message\": \"We would like a demo for 20 people.\"}",
+      "description": "The lead as a JSON string: name, email, company (optional), message (optional)"
+    },
+    "leads_file": {
+      "default": "~/openclaw-cookbook-output/leads.csv",
+      "description": "CSV file the leads are appended to (created if missing)"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for new-lead alerts (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "validate",
+      "run": "node -e 'let raw; try { raw = JSON.parse(process.env.LOBSTER_ARG_PAYLOAD) } catch (e) { raw = null } const errors = []; if (!raw || typeof raw !== \"object\") errors.push(\"payload is not a JSON object\"); raw = raw || {}; const clean = s => String(s == null ? \"\" : s).replace(/\\s+/g, \" \").trim().slice(0, 500); const lead = { name: clean(raw.name), email: clean(raw.email).toLowerCase(), company: clean(raw.company), message: clean(raw.message) }; if (!lead.name) errors.push(\"name is missing\"); if (!/^[^@\\s]+@[^@\\s]+\\.[a-z]{2,}$/.test(lead.email)) errors.push(\"email is not valid\"); console.log(JSON.stringify({ valid: errors.length === 0, errors, lead }))'"
+    },
+    {
+      "id": "save",
+      "when": "$validate.json.valid == true",
+      "env": {
+        "LEAD": "$validate.json.lead"
+      },
+      "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const file = process.env.LOBSTER_ARG_LEADS_FILE.replace(/^~(?=\\/|$)/, require(\"os\").homedir()); const lead = JSON.parse(process.env.LEAD); const csv = v => /[\",\\n]/.test(v) ? \"\\\"\" + v.replace(/\"/g, \"\\\"\\\"\") + \"\\\"\" : v; const header = \"received_at,name,email,company,message\"; const existing = fs.existsSync(file) ? fs.readFileSync(file, \"utf8\") : \"\"; const emails = existing.split(\"\\n\").slice(1).map(l => (l.match(/^[^,]*,(?:\"(?:[^\"]|\"\")*\"|[^,]*),([^,]*)/) || [])[1]).filter(Boolean); if (emails.includes(lead.email)) { console.log(JSON.stringify({ added: false, reason: \"duplicate\", lead, file })); process.exit(0) } fs.mkdirSync(path.dirname(file), { recursive: true }); const row = [new Date().toISOString(), lead.name, lead.email, lead.company, lead.message].map(csv).join(\",\"); fs.writeFileSync(file, (existing ? existing.replace(/\\n?$/, \"\\n\") : header + \"\\n\") + row + \"\\n\"); console.log(JSON.stringify({ added: true, total: emails.length + 1, lead, file }))'"
+    },
+    {
+      "id": "rejected",
+      "when": "$validate.json.valid == false",
+      "env": {
+        "RESULT": "$validate.stdout"
+      },
+      "run": "node -e 'const r = JSON.parse(process.env.RESULT); console.log(\"❌ Lead rejected: \" + r.errors.join(\", \"))'"
+    },
+    {
+      "id": "duplicate",
+      "when": "$save.json.added == false",
+      "env": {
+        "EMAIL": "$save.json.lead.email"
+      },
+      "run": "printf 'Duplicate lead ignored: %s is already in the list.\\n' \"$EMAIL\""
+    },
+    {
+      "id": "notify",
+      "when": "$save.json.added == true",
+      "env": {
+        "RESULT": "$save.stdout"
+      },
+      "run": "MSG=$(node -e 'const r = JSON.parse(process.env.RESULT); const l = r.lead; console.log(\"🆕 New lead #\" + r.total + \": \" + l.name + \" <\" + l.email + \">\" + (l.company ? \" from \" + l.company : \"\") + (l.message ? \"\\n💬 \" + l.message : \"\"))'); if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

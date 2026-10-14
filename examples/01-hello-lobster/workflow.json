@@ -1,0 +1,32 @@
+{
+  "name": "hello-lobster",
+  "description": "Your first OpenClaw workflow: read arguments, run steps in order, and pass JSON from one step to the next.",
+  "args": {
+    "name": {
+      "default": "World",
+      "description": "Who to greet"
+    },
+    "language": {
+      "default": "en",
+      "description": "Greeting language: en, zh, es, fr or de"
+    }
+  },
+  "steps": [
+    {
+      "id": "greet",
+      "run": "node -e 'const words = { en: \"Hello\", zh: \"你好\", es: \"Hola\", fr: \"Bonjour\", de: \"Hallo\" }; const word = words[process.env.LOBSTER_ARG_LANGUAGE] || words.en; console.log(JSON.stringify({ greeting: word + \", \" + process.env.LOBSTER_ARG_NAME + \"!\" }))'"
+    },
+    {
+      "id": "facts",
+      "run": "node -e 'const os = require(\"os\"); console.log(JSON.stringify({ platform: os.platform(), node: process.version, cpus: os.cpus().length, uptimeHours: Math.round(os.uptime() / 3600), time: new Date().toISOString() }))'"
+    },
+    {
+      "id": "report",
+      "env": {
+        "GREETING": "$greet.json.greeting"
+      },
+      "stdin": "$facts.json",
+      "run": "node -e 'const facts = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); console.log(JSON.stringify({ message: process.env.GREETING + \" This workflow ran on \" + facts.platform + \" (Node \" + facts.node + \", \" + facts.cpus + \" CPUs) at \" + facts.time + \".\", facts: facts }))'"
+    }
+  ]
+}

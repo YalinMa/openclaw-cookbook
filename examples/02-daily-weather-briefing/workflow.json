@@ -1,0 +1,48 @@
+{
+  "name": "daily-weather-briefing",
+  "description": "Fetch today's forecast from Open-Meteo (free, no API key) and turn it into a friendly chat message. Optionally send it to a chat channel.",
+  "args": {
+    "city": {
+      "default": "Berlin",
+      "description": "Display name used in the message"
+    },
+    "latitude": {
+      "default": "52.52",
+      "description": "Latitude of the city"
+    },
+    "longitude": {
+      "default": "13.41",
+      "description": "Longitude of the city"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel to send the message to (telegram, slack, discord, feishu...). Empty = just return it."
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "forecast",
+      "run": "curl -fsS --max-time 20 \"https://api.open-meteo.com/v1/forecast?latitude=$LOBSTER_ARG_LATITUDE&longitude=$LOBSTER_ARG_LONGITUDE&current=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=1\"",
+      "retry": {
+        "max": 3,
+        "backoff": "exponential",
+        "delay_ms": 2000
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "id": "format",
+      "stdin": "$forecast.json",
+      "run": "node -e 'const f = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")); const codes = { 0: \"☀️ Clear sky\", 1: \"🌤️ Mainly clear\", 2: \"⛅ Partly cloudy\", 3: \"☁️ Overcast\", 45: \"🌫️ Fog\", 48: \"🌫️ Fog\", 51: \"🌦️ Light drizzle\", 53: \"🌦️ Drizzle\", 55: \"🌧️ Heavy drizzle\", 61: \"🌦️ Light rain\", 63: \"🌧️ Rain\", 65: \"🌧️ Heavy rain\", 71: \"🌨️ Light snow\", 73: \"🌨️ Snow\", 75: \"❄️ Heavy snow\", 80: \"🌦️ Rain showers\", 81: \"🌧️ Rain showers\", 82: \"⛈️ Violent showers\", 95: \"⛈️ Thunderstorm\", 96: \"⛈️ Thunderstorm with hail\", 99: \"⛈️ Thunderstorm with hail\" }; const d = f.daily; const rain = d.precipitation_probability_max[0]; const lines = [\"Good morning! Weather for \" + process.env.LOBSTER_ARG_CITY + \" today (\" + d.time[0] + \"):\", codes[d.weather_code[0]] || \"🌡️ Weather code \" + d.weather_code[0], \"🌡️ \" + d.temperature_2m_min[0] + \"°C – \" + d.temperature_2m_max[0] + \"°C (now \" + f.current.temperature_2m + \"°C)\", \"☔ Chance of rain: \" + rain + \"%\", rain >= 50 ? \"👉 Take an umbrella!\" : \"👉 No umbrella needed.\"]; console.log(lines.join(\"\\n\"))'"
+    },
+    {
+      "id": "notify",
+      "stdin": "$format.stdout",
+      "run": "MSG=$(cat); if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}

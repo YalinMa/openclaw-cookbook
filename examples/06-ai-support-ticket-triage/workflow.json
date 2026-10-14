@@ -1,0 +1,52 @@
+{
+  "name": "ai-support-ticket-triage",
+  "description": "Classify support tickets with an LLM (category, urgency, summary, draft reply), show a triage report, and only save the draft replies after a human approves.",
+  "args": {
+    "tickets_file": {
+      "default": "examples/06-ai-support-ticket-triage/tickets.json",
+      "description": "JSON file with an array of { id, from, subject, body }. Relative paths are resolved from the directory Lobster runs in."
+    },
+    "outbox": {
+      "default": "~/openclaw-cookbook-output/support-outbox",
+      "description": "Folder where approved draft replies are written"
+    }
+  },
+  "steps": [
+    {
+      "id": "tickets",
+      "run": "node -e 'const fs = require(\"fs\"); const path = process.env.LOBSTER_ARG_TICKETS_FILE.replace(/^~(?=\\/|$)/, require(\"os\").homedir()); const tickets = JSON.parse(fs.readFileSync(path, \"utf8\")); if (!Array.isArray(tickets) || !tickets.length) throw new Error(\"No tickets found in \" + path); console.log(JSON.stringify(tickets))'"
+    },
+    {
+      "id": "classify",
+      "for_each": "$tickets.json",
+      "item_var": "ticket",
+      "steps": [
+        {
+          "id": "ai",
+          "stdin": "$ticket.json",
+          "pipeline": "llm.invoke --prompt 'You are a support lead. Triage this customer ticket. category: bug, billing, how_to, feature_request or spam. urgency: high if the customer is blocked or charged incorrectly, low for ideas and questions. summary: one short sentence. reply: a friendly, specific reply under 80 words, signed \"The Support Team\" (empty string for spam).' --output-schema '{\"type\":\"object\",\"properties\":{\"category\":{\"type\":\"string\",\"enum\":[\"bug\",\"billing\",\"how_to\",\"feature_request\",\"spam\"]},\"urgency\":{\"type\":\"string\",\"enum\":[\"high\",\"medium\",\"low\"]},\"summary\":{\"type\":\"string\"},\"reply\":{\"type\":\"string\"}},\"required\":[\"category\",\"urgency\",\"summary\",\"reply\"]}'"
+        }
+      ]
+    },
+    {
+      "id": "report",
+      "stdin": "$classify.json",
+      "run": "node -e 'const rows = JSON.parse(require(\"fs\").readFileSync(0, \"utf8\")).map(r => { const ai = Array.isArray(r.ai) ? r.ai[0] : r.ai; return Object.assign({}, r.ticket, ai.output.data) }); const order = { high: 0, medium: 1, low: 2 }; rows.sort((a, b) => order[a.urgency] - order[b.urgency]); const icon = { high: \"🔴\", medium: \"🟠\", low: \"🟢\" }; const lines = [\"Triage report: \" + rows.length + \" tickets\", \"\"]; rows.forEach(r => lines.push(icon[r.urgency] + \" \" + r.id + \" [\" + r.category + \"] \" + r.subject + \" — \" + r.summary)); const replies = rows.filter(r => r.category !== \"spam\" && r.reply).map(r => ({ id: r.id, to: r.from, subject: \"Re: \" + r.subject, body: r.reply })); lines.push(\"\", replies.length + \" draft replies ready (spam is skipped):\"); replies.forEach(r => lines.push(\"\", \"✉️ To \" + r.to + \" — \" + r.subject, r.body)); console.log(JSON.stringify({ report: lines.join(\"\\n\"), reportLines: lines.filter(Boolean), tickets: rows, replies }))'"
+    },
+    {
+      "id": "approve",
+      "stdin": "$report.json.reportLines",
+      "approval": {
+        "prompt": "Save the draft replies listed in this triage report to the outbox?"
+      }
+    },
+    {
+      "id": "save",
+      "when": "$approve.approved",
+      "env": {
+        "REPLIES": "$report.json.replies"
+      },
+      "run": "node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const dir = process.env.LOBSTER_ARG_OUTBOX.replace(/^~(?=\\/|$)/, require(\"os\").homedir()); fs.mkdirSync(dir, { recursive: true }); const replies = JSON.parse(process.env.REPLIES); for (const r of replies) { fs.writeFileSync(path.join(dir, r.id + \".md\"), \"To: \" + r.to + \"\\nSubject: \" + r.subject + \"\\n\\n\" + r.body + \"\\n\") } console.log(\"✅ Saved \" + replies.length + \" draft replies to \" + dir)'"
+    }
+  ]
+}

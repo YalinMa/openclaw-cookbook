@@ -1,0 +1,20 @@
+{
+  "name": "openclaw-cookbook",
+  "version": "1.0.0",
+  "private": true,
+  "description": "10 practical, tested OpenClaw (Lobster) workflow recipes for beginners",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "validate": "node scripts/validate.mjs",
+    "test": "node scripts/test-recipes.mjs",
+    "llm:mock": "node scripts/llm-adapter.mjs --mock",
+    "llm": "node scripts/llm-adapter.mjs"
+  },
+  "devDependencies": {
+    "@clawdbot/lobster": "2026.9.16"
+  }
+}

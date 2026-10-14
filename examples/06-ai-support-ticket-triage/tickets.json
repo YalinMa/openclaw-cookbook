@@ -1,0 +1,32 @@
+[
+  {
+    "id": "T-1001",
+    "from": "anna@example.com",
+    "subject": "Charged twice this month",
+    "body": "Hi, I just checked my card statement and I was billed twice for the Pro plan in October. Can you refund the extra charge? Order #88412."
+  },
+  {
+    "id": "T-1002",
+    "from": "ben@example.org",
+    "subject": "App crashes when I upload a photo",
+    "body": "Since yesterday's update the iOS app closes immediately when I try to upload a profile photo. iPhone 15, iOS 26.1. This is blocking my whole team from onboarding."
+  },
+  {
+    "id": "T-1003",
+    "from": "carla@example.net",
+    "subject": "How do I export my data?",
+    "body": "Is there a way to export all my projects to CSV? I couldn't find it in the settings."
+  },
+  {
+    "id": "T-1004",
+    "from": "deals@cheap-pills.example",
+    "subject": "BEST PRICES!!! Click now",
+    "body": "Limited offer, 90% off, click the link below to claim your prize."
+  },
+  {
+    "id": "T-1005",
+    "from": "dmitri@example.com",
+    "subject": "Feature idea: dark mode",
+    "body": "Love the product! It would be great to have a dark mode for late-night work. Any plans?"
+  }
+]

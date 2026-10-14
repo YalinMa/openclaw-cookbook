@@ -1,0 +1,75 @@
+{
+  "name": "github-release-watcher",
+  "description": "Watch GitHub repositories for new releases. Remembers the last version it saw and only reports what is new.",
+  "args": {
+    "repos": {
+      "default": "openclaw/openclaw, nodejs/node, microsoft/vscode",
+      "description": "Comma-separated owner/repo list"
+    },
+    "state_key": {
+      "default": "cookbook-github-releases",
+      "description": "Where the last-seen versions are saved"
+    },
+    "notify_channel": {
+      "default": "",
+      "description": "Optional OpenClaw channel for the update (telegram, slack, discord, feishu...)"
+    },
+    "notify_target": {
+      "default": "",
+      "description": "Optional chat id / channel id for notify_channel"
+    }
+  },
+  "steps": [
+    {
+      "id": "repos",
+      "run": "node -e 'const list = process.env.LOBSTER_ARG_REPOS.split(\",\").map(r => r.trim()).filter(Boolean); console.log(JSON.stringify(list.map(repo => ({ repo }))))'"
+    },
+    {
+      "id": "latest",
+      "for_each": "$repos.json",
+      "item_var": "target",
+      "pause_ms": 500,
+      "steps": [
+        {
+          "id": "release",
+          "env": {
+            "REPO": "$target.json.repo"
+          },
+          "run": "node -e 'const repo = process.env.REPO; const headers = { \"User-Agent\": \"openclaw-cookbook\", Accept: \"application/vnd.github+json\" }; if (process.env.GITHUB_TOKEN) headers.Authorization = \"Bearer \" + process.env.GITHUB_TOKEN; fetch(\"https://api.github.com/repos/\" + repo + \"/releases/latest\", { headers, signal: AbortSignal.timeout(15000) }).then(async r => { const b = await r.json(); return r.ok ? { repo, tag: b.tag_name, name: b.name || b.tag_name, url: b.html_url, published: b.published_at } : { repo, error: \"HTTP \" + r.status + \": \" + b.message } }, e => ({ repo, error: String(e.name) })).then(x => console.log(JSON.stringify(x)))'"
+        }
+      ]
+    },
+    {
+      "id": "previous",
+      "pipeline": "state.get ${state_key}"
+    },
+    {
+      "id": "compare",
+      "env": {
+        "LATEST": "$latest.stdout",
+        "PREVIOUS": "$previous.stdout"
+      },
+      "run": "node -e 'const latest = JSON.parse(process.env.LATEST).map(x => x.release); let prev = JSON.parse(process.env.PREVIOUS || \"null\"); if (Array.isArray(prev)) prev = prev[0]; const firstRun = !prev; prev = prev || {}; const found = latest.filter(r => r.tag); const fresh = found.filter(r => prev[r.repo] !== r.tag); const errors = latest.filter(r => r.error); const lines = []; if (firstRun) { lines.push(\"👀 Now watching \" + found.length + \" repositories. Current versions:\"); found.forEach(r => lines.push(\"• \" + r.repo + \" \" + r.tag)); } else { fresh.forEach(r => lines.push(\"🚀 \" + r.repo + \" released \" + r.tag + (prev[r.repo] ? \" (was \" + prev[r.repo] + \")\" : \"\") + \"\\n   \" + r.url)); if (!fresh.length) lines.push(\"No new releases.\"); } errors.forEach(r => lines.push(\"⚠️ \" + r.repo + \": \" + r.error)); const seen = Object.assign({}, prev); found.forEach(r => { seen[r.repo] = r.tag }); console.log(JSON.stringify({ hasNews: firstRun || fresh.length > 0, message: lines.join(\"\\n\"), newReleases: fresh, seen }))'"
+    },
+    {
+      "id": "save",
+      "stdin": "$compare.json.seen",
+      "pipeline": "state.set ${state_key}"
+    },
+    {
+      "id": "result",
+      "env": {
+        "RESULT": "$compare.stdout"
+      },
+      "run": "printf '%s\\n' \"$RESULT\""
+    },
+    {
+      "id": "notify",
+      "when": "$compare.json.hasNews == true",
+      "env": {
+        "MSG": "$compare.json.message"
+      },
+      "run": "if [ -n \"$LOBSTER_ARG_NOTIFY_CHANNEL\" ]; then openclaw message send --channel \"$LOBSTER_ARG_NOTIFY_CHANNEL\" --target \"$LOBSTER_ARG_NOTIFY_TARGET\" --message \"$MSG\" >&2; fi; printf '%s\\n' \"$MSG\""
+    }
+  ]
+}
